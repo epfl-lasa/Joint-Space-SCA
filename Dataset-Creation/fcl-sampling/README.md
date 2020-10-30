@@ -14,4 +14,5 @@ The first parameter specifies submodel number, and the second - desired size of 
 For example, to generate 100000 datapoints for specific model (let's say 1 - describing both arms), one should launch `./main 1 100000`. Code is not parallelized, but it can be achieved by launching multiple instances in two terminals, `./main 1 100000` + `./main 1 100000` would generate two separate datasets of 100k size, that can later be merged into single dataset on the processing stage.
 
 # Precomputed datasets
+Achieved by running ./main i 100000 ten times for i=1..10. In total 100 runs (10x100,000 for i = 1..10).
 https://drive.google.com/file/d/1B-_hR59ftv93V3_rvtORBuVH7i15BJxZ/view?usp=sharing
