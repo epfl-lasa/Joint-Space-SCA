@@ -1,3 +1,5 @@
+# Visualisation
+![alt text](https://github.com/epfl-lasa/Joint-Space-SCA/blob/main/Dataset-Creation/fcl-sampling/sampling_vis.gif)
 # Dependencies: 
 1) Eigen3 - `sudo apt install libeigen3-dev`
 2) CCD - https://github.com/danfis/libccd
