@@ -1,0 +1,6 @@
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"/><title>Unknown </title></head><body>
+<p>Usage is described below:
+As we have 10 submodels to describe self-collsions for humanoid robot iCub,
+we need to generate 10 datasets.
+To generate 100000 datapoints for specific model (let's say 1 - describing both arms), one should launch "./main 1 100000", so first parameter specifies submodel number, and second - desired size of the dataset. Code is not parallelized, but it can be achieved by launching multiple instances in two terminals, ./main 1 100000 + ./main 1 100000 will generate two separate datasets of 100k size, which can later be merged into single dataset on the processing stage. That is of course a dirty solution. </p>
+</body></html>
