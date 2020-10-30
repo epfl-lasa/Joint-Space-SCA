@@ -1,3 +1,3 @@
-datasets generation may take couple of hours, they are
-also too heavy to be hosted on github. Please download data from the link:
-www.ch
+Datasets generation may take couple of hours, they are also too heavy to be hosted on github. 
+Please download data from the link: https://drive.google.com/file/d/1B-_hR59ftv93V3_rvtORBuVH7i15BJxZ/view?usp=sharing
+If link is not functioning, please contact Michael Koptev via e-mail or git.
