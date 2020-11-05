@@ -1,9 +1,20 @@
 clc
 clear all
+% This function requires to specify the size of the desired dataset, and
+% what side take tha data from (start-end).
+% libsvm (and thundersvm) require separate .txt file for each dataset
+% (train, test), that's why we generate those .txt in such manner instead
+% of putting all the data in single .txt
+% In .bin we have class labels unordered, here we sort them and take sz/2
+% of positive class and sz/2 from negative from beginning or end of the
+% collected dataset. 
+% mode = "start" - taking values from the beginning of data array (training)
+% mode = "end" - taking values from the end (testing)
+% generally you need to launch this function 4 times, uncommenting first
+% four lines of the cycle to generate 250k & 15
 
-%for part_idx = 1:1:10
-    
-part_idx = 1; %1-10 body pair index
+for part_idx = 1:1:10    
+%part_idx = 1; %1-10 body pair index
 part_idx
 %dataset_size = 250000; mode = "start";
 %dataset_size = 150000; mode = "end";
@@ -11,11 +22,7 @@ part_idx
 %dataset_size = 900000; mode = "start";
 %dataset_size = 100000; mode = "end";
 
-%dataset_size = 850000; mode = "start"; //for 900k 1_models
-dataset_size = 50000; mode = "end";
-%mode = "start"; %taking values from the beginning of data array (training)
-%mode = "end"; %taking values from the end (testing)
-flist = dir("../dataset_fcl/dataset_parts/data/");
+flist = dir("../fcl-sampling/data/");
 fnames = [];
 data = [];
 %check all files in folder and push all "data_#part_idx_%" to "data"
