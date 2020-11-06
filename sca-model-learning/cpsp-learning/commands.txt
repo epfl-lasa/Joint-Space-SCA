@@ -1,0 +1,32 @@
+./svm_perf_learn -c 500000 -t 2 -g 0.5 --i 2 -w 9 --b 0 --k 1000 ../datasets/1_icub_dataset_libsvm_900k_start.txt ../models/cpsp_model_1.txt
+./svm_perf_classify ../datasets/1_icub_dataset_libsvm_100k_end.txt ../models/cpsp_model_1.txt data/pred_1.txt
+
+./svm_perf_learn -c 500000 -t 2 -g 0.5 --i 2 -w 9 --b 0 --k 1000 ../datasets/2_icub_dataset_libsvm_900k_start.txt ../models/cpsp_model_2.txt
+./svm_perf_classify ../datasets/2_icub_dataset_libsvm_100k_end.txt ../models/cpsp_model_2.txt data/pred_2.txt
+
+./svm_perf_learn -c 500000 -t 2 -g 0.5 --i 2 -w 9 --b 0 --k 1000 ../datasets/3_icub_dataset_libsvm_900k_start.txt ../models/cpsp_model_3.txt
+./svm_perf_classify ../datasets/3_icub_dataset_libsvm_100k_end.txt ../models/cpsp_model_3.txt data/pred_3.txt
+
+./svm_perf_learn -c 500000 -t 2 -g 0.5 --i 2 -w 9 --b 0 --k 1000 ../datasets/4_icub_dataset_libsvm_900k_start.txt ../models/cpsp_model_4.txt
+./svm_perf_classify ../datasets/4_icub_dataset_libsvm_100k_end.txt ../models/cpsp_model_4.txt data/pred_4.txt
+
+./svm_perf_learn -c 500000 -t 2 -g 0.5 --i 2 -w 9 --b 0 --k 1000 ../datasets/5_icub_dataset_libsvm_900k_start.txt ../models/cpsp_model_5.txt
+./svm_perf_classify ../datasets/5_icub_dataset_libsvm_100k_end.txt ../models/cpsp_model_5.txt data/pred_5.txt
+
+./svm_perf_learn -c 500000 -t 2 -g 0.5 --i 2 -w 9 --b 0 --k 1000 ../datasets/6_icub_dataset_libsvm_900k_start.txt ../models/cpsp_model_6.txt
+./svm_perf_classify ../datasets/6_icub_dataset_libsvm_100k_end.txt ../models/cpsp_model_6.txt data/pred_6.txt
+
+./svm_perf_learn -c 500000 -t 2 -g 0.5 --i 2 -w 9 --b 0 --k 1000 ../datasets/7_icub_dataset_libsvm_900k_start.txt ../models/cpsp_model_7.txt
+./svm_perf_classify ../datasets/7_icub_dataset_libsvm_100k_end.txt ../models/cpsp_model_7.txt data/pred_7.txt
+
+./svm_perf_learn -c 500000 -t 2 -g 0.5 --i 2 -w 9 --b 0 --k 1000 ../datasets/8_icub_dataset_libsvm_900k_start.txt ../models/cpsp_model_8.txt
+./svm_perf_classify ../datasets/8_icub_dataset_libsvm_100k_end.txt ../models/cpsp_model_8.txt data/pred_8.txt
+
+./svm_perf_learn -c 500000 -t 2 -g 0.5 --i 2 -w 9 --b 0 --k 1000 ../datasets/9_icub_dataset_libsvm_900k_start.txt ../models/cpsp_model_9.txt
+./svm_perf_classify ../datasets/9_icub_dataset_libsvm_100k_end.txt ../models/cpsp_model_9.txt data/pred_9.txt
+
+./svm_perf_learn -c 500000 -t 2 -g 0.5 --i 2 -w 9 --b 0 --k 1000 ../datasets/10_icub_dataset_libsvm_900k_start.txt ../models/cpsp_model_10.txt
+./svm_perf_classify ../datasets/10_icub_dataset_libsvm_100k_end.txt ../models/cpsp_model_10.txt data/pred_10.txt
+
+
+
