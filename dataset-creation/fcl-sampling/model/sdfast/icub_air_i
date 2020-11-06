@@ -1,0 +1,118 @@
+SD/FAST Information File: icub_air.sd
+Generated 22-Nov-2018 13:14:18 by SD/FAST, Kane's formulation
+(sdfast B.2.8 #30123) on machine ID unknown
+
+ROADMAP (icub_air.sd)
+
+Bodies           Inb
+No  Name         body Joint type  Coords q         Multipliers
+--- ------------ ---- ----------- ---------------- -----------------------
+ -1 $ground                                       |
+  0 root_link     -1  Sixdof        0?  1?  2?    |
+                      ...           3?  4?  5? 38 |  0p  1p  2p  3p  4p  5p
+  1 torso_1        0  Pin           6?            |  6p
+  2 torso_2        1  Pin           7?            |  7p
+  3 chest          2  Pin           8?            |  8p
+  4 neck_1         3  Pin           9?            |  9p
+  5 neck_2         4  Pin          10?            | 10p
+  6 head           5  Pin          11?            | 11p
+  7 l_hip_1        0  Pin          12?            | 12p
+  8 l_hip_2        7  Pin          13?            | 13p
+  9 l_hip_3        8  Weld                        |
+ 10 l_upper_leg    9  Pin          14?            | 14p
+ 11 l_lower_leg   10  Pin          15?            | 15p
+ 12 l_ankle_1     11  Pin          16?            | 16p
+ 13 l_ankle_2     12  Pin          17?            | 17p
+ 14 l_foot        13  Weld                        |
+ 15 r_hip_1        0  Pin          18?            | 18p
+ 16 r_hip_2       15  Pin          19?            | 19p
+ 17 r_hip_3       16  Weld                        |
+ 18 r_upper_leg   17  Pin          20?            | 20p
+ 19 r_lower_leg   18  Pin          21?            | 21p
+ 20 r_ankle_1     19  Pin          22?            | 22p
+ 21 r_ankle_2     20  Pin          23?            | 23p
+ 22 r_foot        21  Weld                        |
+ 23 l_shoulder_1   3  Pin          24?            | 24p
+ 24 l_shoulder_2  23  Pin          25?            | 25p
+ 25 l_shoulder_3  24  Pin          26?            | 26p
+ 26 l_upper_arm   25  Weld                        |
+ 27 l_elbow_1     26  Pin          27?            | 27p
+ 28 l_forearm     27  Pin          28?            | 28p
+ 29 l_wrist_1     28  Pin          29?            | 29p
+ 30 l_hand        29  Pin          30?            | 30p
+ 31 r_shoulder_1   3  Pin          31?            | 31p
+ 32 r_shoulder_2  31  Pin          32?            | 32p
+ 33 r_shoulder_3  32  Pin          33?            | 33p
+ 34 r_upper_arm   33  Weld                        |
+ 35 r_elbow_1     34  Pin          34?            | 34p
+ 36 r_forearm     35  Pin          35?            | 35p
+ 37 r_wrist_1     36  Pin          36?            | 36p
+ 38 r_hand        37  Pin          37?            | 37p
+
+
+STATE INDEX TO JOINT/AXIS MAP (icub_air.sd)
+
+ Index
+  q|u   Joint  Axis   Joint type    Axis type    Joint Name
+ -----  -----  ----   -----------   ----------   ----------
+  0|39      0     0?  Sixdof        translate    
+  1|40      .     1?  .             translate 
+  2|41      .     2?  .             translate 
+  3|42      .     3?  .             quaternion
+  4|43      .     4?  .             quaternion
+  5|44      .     5?  .             quaternion
+  6|45      1     0?  Pin           rotate       
+  7|46      2     0?  Pin           rotate       
+  8|47      3     0?  Pin           rotate       
+  9|48      4     0?  Pin           rotate       
+ 10|49      5     0?  Pin           rotate       
+ 11|50      6     0?  Pin           rotate       
+ 12|51      7     0?  Pin           rotate       
+ 13|52      8     0?  Pin           rotate       
+ 14|53     10     0?  Pin           rotate       
+ 15|54     11     0?  Pin           rotate       
+ 16|55     12     0?  Pin           rotate       
+ 17|56     13     0?  Pin           rotate       
+ 18|57     15     0?  Pin           rotate       
+ 19|58     16     0?  Pin           rotate       
+ 20|59     18     0?  Pin           rotate       
+ 21|60     19     0?  Pin           rotate       
+ 22|61     20     0?  Pin           rotate       
+ 23|62     21     0?  Pin           rotate       
+ 24|63     23     0?  Pin           rotate       
+ 25|64     24     0?  Pin           rotate       
+ 26|65     25     0?  Pin           rotate       
+ 27|66     27     0?  Pin           rotate       
+ 28|67     28     0?  Pin           rotate       
+ 29|68     29     0?  Pin           rotate       
+ 30|69     30     0?  Pin           rotate       
+ 31|70     31     0?  Pin           rotate       
+ 32|71     32     0?  Pin           rotate       
+ 33|72     33     0?  Pin           rotate       
+ 34|73     35     0?  Pin           rotate       
+ 35|74     36     0?  Pin           rotate       
+ 36|75     37     0?  Pin           rotate       
+ 37|76     38     0?  Pin           rotate       
+ 38|        0     6   Sixdof        4th quat  
+   
+
+SYSTEM PARAMETERS (icub_air.sd)
+
+Parameter  Value  Description
+
+nbod          39  no. bodies (also, no. of tree joints)
+njnt          39  total number of joints (tree+loop)
+ndof          38  no. degrees of freedom allowed by tree joints
+nloop          0  no. loop joints
+nldof          0  no. degrees of freedom allowed by loop joints
+
+nq            39  no. position coordinates in state (tree joints)
+nu            38  no. rate coordinates in state (tree joints)
+nlq            0  no. position coordinates describing loop joints
+nlu            0  no. rate coordinates describing loop joints
+
+nc            38  total no. constraints defined
+nlc            0  no. loop joint constraints
+npresc        38  no. prescribed motion constraints
+nuserc         0  no. user constraints
+
