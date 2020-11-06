@@ -1,3 +1,3 @@
 To learn CPSP models it is required to use SVM_perf library: http://www.cs.cornell.edu/people/tj/svm_light/svm_perf.html
 
-Commands to learn the models are provided in `commands.txt`. Use `eval_cpsp.m` to evaluate the performance of the models.
+Commands to learn the models are provided in `commands.txt`. Use `cpsp_eval.m` to evaluate the performance of the models.
