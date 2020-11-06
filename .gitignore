@@ -2,3 +2,4 @@ build/*
 *.bin
 *start.txt
 *end.txt
+*.asv
