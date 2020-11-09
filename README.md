@@ -1,5 +1,6 @@
 # Joint-Space-SCA
 [![Corresponding video](https://img.youtube.com/vi/u3lTwFZFicY/0.jpg)](https://www.youtube.com/watch?v=u3lTwFZFicY)
+
 Click the picture above to be redirected to the YouTube video explaining the contents of this repository. Paper reference will be added later.
 
 Steps to reproduce the results shown in the video:
