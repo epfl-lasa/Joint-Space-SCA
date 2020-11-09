@@ -1,3 +1,0 @@
-/home/sfaraji/Dropbox/LASA/real_robot3/dependencies/IMU/build/CMakeFiles/rebuild_cache.dir
-/home/sfaraji/Dropbox/LASA/real_robot3/dependencies/IMU/build/CMakeFiles/edit_cache.dir
-/home/sfaraji/Dropbox/LASA/real_robot3/dependencies/IMU/build/CMakeFiles/main.dir
