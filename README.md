@@ -1,5 +1,5 @@
 # Joint-Space-SCA
-[![Corresponding video](https://img.youtube.com/vi/u3lTwFZFicY/0.jpg)](https://www.youtube.com/watch?v=u3lTwFZFicY)
+[![Corresponding video](https://github.com/epfl-lasa/Joint-Space-SCA/blob/main/simulation/frontpic.png?raw=true)](https://www.youtube.com/watch?v=u3lTwFZFicY)
 
 Click the picture above to be redirected to the YouTube video explaining the contents of this repository. Paper reference will be added later.
 
