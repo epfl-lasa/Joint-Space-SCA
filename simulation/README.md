@@ -1,1 +1,1 @@
-icubAssistant repo, but with Self-Collision Avoidance (learned with neural networks)
+Simulation is heavily based on https://github.com/epfl-lasa/iCub-Assistant , please follow the repo guide to build it. 
