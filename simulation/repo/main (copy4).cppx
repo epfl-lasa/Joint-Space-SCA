@@ -1,0 +1,1222 @@
+#include <string>
+#include <cstdio>
+#include <iostream>
+#include <fstream>
+#include <cmath>
+#include <signal.h>
+#include <unistd.h>
+
+
+// lpvDS stuff
+#include <stdio.h>
+#include <fstream>
+#include <time.h>
+#include "eigen3/Eigen/Dense"
+#include "lpvDS.h"
+#include "utils.h"
+
+#include "Wrapper.h"
+#include "IK.h"
+#include "mesh_utils.h"
+using namespace std;
+
+#define HARDWARE false
+
+/* Index reference and a natural posture of icub           */
+/* global positions                                        */
+/* pelvis pos:     pos[0] pos[1] pos[2]                    */
+/* pelvis rot:     pos[3] pos[4] pos[5] pos[38]            */
+/*                 // right      // left                   */
+/* head                   pos[11]                          */
+/* neck roll              pos[10]                          */
+/* neck pitch             pos[9]                           */
+/* shoulder pitch  pos[31]       pos[24]                   */
+/* shoulder roll   pos[32]       pos[25]                   */
+/* shoulder yaw    pos[33]       pos[26]                   */
+/* elbow           pos[34]       pos[27]                   */
+/* forearm yaw     pos[35]       pos[28]                   */
+/* forearm roll    pos[36]       pos[29]                   */
+/* forearm pitch   pos[37]       pos[30]                   */
+/* torso pitch            pos[6]                           */
+/* torso roll             pos[7]                           */
+/* torso yaw              pos[8]                           */
+/* hip pitch       pos[18]      pos[12]                    */
+/* hip roll        pos[19]       pos[13]                   */
+/* hip yaw         pos[20]       pos[14]                   */
+/* knee            pos[21]       pos[15]                   */
+/* ankle pitch     pos[22]       pos[16]                   */
+/* ankle roll      pos[23]       pos[17]                   */
+
+enum state {BALANCE=0,  PICK_APPROACH, PICK, PICK_STAND, DROP_APPROACH, DROP, DROP_STAND, WALK_START, WALK, WALK_STOP};
+enum trigger {NONE=0, GO, HALT, TAKE, RELEASE};
+
+bool exit_sim = false;
+void my_handler(int s)
+{
+	cout << "Exit Program Now ... " << endl;
+	exit_sim = true;
+}
+
+class Joints
+{
+public:
+	
+	VectorXd ref_pos;
+	VectorXd sens_pos;
+	VectorXd init_pos;
+	VectorXd Ik_pos0;
+	VectorXd com_pos;
+	VectorXd sens_vel;
+	VectorXd sens_acc;
+	VectorXd sens_tau;
+	VectorXd freeze;
+	VectorXd mode;
+
+	void initialize()
+	{
+		ref_pos  = VectorXd::Zero(AIR_N_U+1); ref_pos[AIR_N_U] = 1;
+		sens_pos = VectorXd::Zero(AIR_N_U+1); sens_pos[AIR_N_U] = 1;
+		init_pos = VectorXd::Zero(AIR_N_U+1); init_pos[AIR_N_U] = 1;
+		com_pos  = VectorXd::Zero(AIR_N_U+1); com_pos[AIR_N_U] = 1;
+		Ik_pos0  = VectorXd::Zero(AIR_N_U+1); Ik_pos0[AIR_N_U] = 1;
+		Ik_pos0[15] = -0.3;
+		Ik_pos0[21] = -0.3;
+		sens_vel = VectorXd::Zero(AIR_N_U);
+		sens_acc = VectorXd::Zero(AIR_N_U);
+		sens_tau = VectorXd::Zero(AIR_N_U);
+		freeze = VectorXd::Zero(AIR_N_U);
+		mode     = VectorXd::Zero(AIR_N_U);
+	}
+};
+
+void loadData(Wrapper &wrapper, Contact_Manager &points, Joints &joints)
+{
+	wrapper.readSensors(joints.sens_pos, joints.sens_vel, joints.sens_tau);
+
+	//remove yaw angle
+	double roll = atan2(wrapper.R(2,1), wrapper.R(2,2));
+	double pitch = -asin(wrapper.R(2,0));
+	points.heading = atan2(wrapper.R(1,0), wrapper.R(0,0));
+	MatrixXd rot = ang2dc(Vector3d(0,pitch,0)) * ang2dc(Vector3d(roll,0,0));
+
+	joints.sens_pos					= setQ(joints.sens_pos, dc2quat(rot));
+	joints.sens_vel.segment(3,3)	= wrapper.angvel;
+	for(int i=0; i<4; i++)
+	{
+		points[i+1].T.F_sens 	= wrapper.FTsensor[i][0];
+		points[i+1].R.F_sens 	= wrapper.FTsensor[i][1];
+	}
+
+	// update the model
+	points.model.set_state(joints.sens_pos, joints.sens_vel);
+
+	// bring the mid-foot points to zero and make feet point to +x direction
+	points.base 	= points.model.get_pos(points[CN_LF].body, points[CN_LF].offset) * 0.5
+					+ points.model.get_pos(points[CN_RF].body, points[CN_RF].offset) * 0.5;
+	points.dbase 	= points.model.get_vel(points[CN_LF].body, points[CN_LF].offset) * 0.5
+					+ points.model.get_vel(points[CN_RF].body, points[CN_RF].offset) * 0.5;
+
+	// apply transformations
+	joints.sens_pos.segment(0,3) 	-= points.base;
+	joints.sens_vel.segment(0,3) 	-= points.dbase;
+
+	// update the model
+	points.model.set_state(joints.sens_pos, joints.sens_vel);
+	points.update_kinematics();
+}
+
+VectorXd trans7_add(VectorXd a, VectorXd b)
+{
+	VectorXd c(7);
+	c.segment(0,3) = a.segment(0,3) + b.segment(0,3);
+	c.segment(3,4) = quat_mul(b.segment(3,4), a.segment(3,4));
+	return c;
+}
+
+VectorXd trans7_invert(VectorXd a)
+{
+	VectorXd c = a;
+	c.segment(0,3) *= -1.0;
+	c.segment(3,4) = quat_inverse(c.segment(3,4));
+	return c;
+}
+
+VectorXd trans7_sub(VectorXd a, VectorXd b)
+{
+	VectorXd c(7);
+	b = trans7_invert(b);
+	c.segment(0,3) = quat2dc(b.segment(3,4)) * (a.segment(0,3) + b.segment(0,3));
+	c.segment(3,4) = quat_mul(b.segment(3,4), a.segment(3,4));
+	return c;
+}
+
+VectorXd trans7_scale(VectorXd a, double b)
+{
+	VectorXd c = a;
+	c.segment(0,3) *= b;
+	c.segment(3,4) =  quat_scale(c.segment(3,4), b);
+	return c;
+}
+
+VectorXd local_transform(Contact_Manager &points, VectorXd P_R, VectorXd P_obj)
+{
+	// This function brings the Object to a frame attached to the mid-foot point, heading forward
+	// model's base frame
+	VectorXd P_B = vectorbig(points.model.get_pos(0, zero_v3), points.model.get_orient_quat(0));
+
+	// model's feet frame
+	VectorXd P_lf = vectorbig(points[CN_LF].p.pos, points[CN_LF].o.pos);
+	VectorXd P_rf = vectorbig(points[CN_RF].p.pos, points[CN_RF].o.pos);
+
+	// model's mid-foot frame
+	VectorXd P_F = trans7_add(trans7_scale(P_lf,0.5), trans7_scale(P_rf,0.5));
+
+	// model's mid-foot frame in model's base frame
+	VectorXd P_F_B = trans7_sub(P_F, P_B);
+
+	// reality's mid-foot frame in reality's base frame
+	VectorXd P_Fp_R = P_F_B;
+
+	// reality's object frame in reality's base frame
+	VectorXd P_obj_R = trans7_sub(P_obj, P_R);
+
+	// reality's object frame in reality's mid-foot frame
+	VectorXd P_obj_Fp = trans7_sub(P_obj_R, P_Fp_R);
+
+	return P_obj_Fp;
+}
+
+Vector4d projection_gains(double t, double T)
+{
+	// mass = 27.6, height = 1.05, iCub Robot
+	double time = t/T;
+	if (std::abs(T-0.4)<0.1)
+	{
+		// 0 <= time <= 1 : phase time
+		// freq = 2.5 & log10(gain) = 1.1
+		double g1[4] = {
+			exp(-std::pow(time/0.595639,1.0)),
+			exp(-std::pow(time/0.434266,1.0)),
+			exp(-std::pow(time/0.458892,1.0)),
+			exp(-std::pow(time/0.636159,1.0)),
+			};
+		double g2[4] = {
+			exp(-std::pow((1.0-time)/0.1671792 ,2.0)),
+			exp(-std::pow((1.0-time)/0.2202462 ,2.0)),
+			exp(-std::pow((1.0-time)/0.5009862 ,2.0)),
+			exp(-std::pow((1.0-time)/0.1700142 ,2.0)),
+			};
+		double K[4] = {
+			0.228948 * g1[0] + 0.955843 * g2[0],
+			2.538919 * g1[1] + -1.246919 * g2[1],
+			0.033176 * g1[2] + 0.010854 * g2[2],
+			0.640404 * g1[3] + -0.160717 * g2[3],
+			};
+		Vector4d KK(K);
+		return KK;
+	}
+	return VectorXd::Zero(4);
+}
+
+double deadzone(double e,double dz)
+{
+    return e-atan(e*M_PI/2.0/dz)/M_PI*2.0*dz;
+}
+
+class Manipulation
+{
+public:
+	VectorXd bias_lh, bias_rh;
+	VectorXd avg_lh, avg_rh;
+	VectorXd force_lh, force_rh;
+	VectorXd reading_lh, reading_rh;
+
+	void initialize()
+	{
+		bias_lh = VectorXd::Zero(6);
+		bias_rh = VectorXd::Zero(6);
+		avg_lh = VectorXd::Zero(6);
+		avg_rh = VectorXd::Zero(6);	
+		force_lh = VectorXd::Zero(6);
+		force_rh = VectorXd::Zero(6);
+		reading_lh = VectorXd::Zero(6);
+		reading_rh = VectorXd::Zero(6);
+		
+		if(HARDWARE)
+		{
+			// pure bias values read from the hardware when stretching the arms and subtracting lower arm weights
+			bias_lh << -11.8466,  -14.6179,  -36.7255,  0.177665, -0.748966,   0.18572;
+			bias_rh <<  32.6632,  -5.57603,  -55.8315, -0.748966, -0.511756,  0.313862;
+		}
+	}
+
+	void read_forces(Contact_Manager &points)
+	{
+		// arm force estimation, this compensates lower-arm weights
+		MatrixXd Forces(AIR_N_BODY,3);
+		MatrixXd Torques(AIR_N_BODY,3);
+		points.model.get_reac(Forces, Torques);
+
+		MatrixXd RR = points.model.get_orient(26);
+		reading_lh = 	vectorbig(	RR*(-points[CN_LH].T.F_sens-bias_lh.segment(0,3)) + RR*Forces.block(26,0,1,3).transpose(), 
+									RR*(-points[CN_LH].R.F_sens-bias_lh.segment(3,3)) + RR*Torques.block(26,0,1,3).transpose());
+		
+		RR = points.model.get_orient(34);
+		reading_rh = 	vectorbig(	RR*(-points[CN_RH].T.F_sens-bias_rh.segment(0,3)) + RR*Forces.block(34,0,1,3).transpose(),
+									RR*(-points[CN_RH].R.F_sens-bias_rh.segment(3,3)) + RR*Torques.block(34,0,1,3).transpose());
+	}
+
+	void initial_filtering(Contact_Manager &points, double dt)
+	{
+		read_forces(points);
+		
+		// orientation dependent bias if any
+		avg_lh += (reading_lh - avg_lh) * 1.0 * dt;
+		avg_rh += (reading_rh - avg_rh) * 1.0 * dt;
+	}
+
+	void secondary_filtering(Contact_Manager &points, double dt)
+	{
+		read_forces(points);
+		
+		// online differences
+		force_lh += (reading_lh - avg_lh - force_lh) * 5.0 * dt;
+		force_rh += (reading_rh - avg_rh - force_rh) * 5.0 * dt;
+	}
+
+	void compliance_control(Contact_Manager &points, double force_amp)
+	{
+		// calculate force directions
+		Vector3d mid = points[CN_RH].ref_p.pos*0.5 + points[CN_LH].ref_p.pos*0.5;
+		Vector3d hold_force_l = (mid - points[CN_LH].ref_p.pos).normalized() * force_amp;
+		Vector3d hold_force_r = (mid - points[CN_RH].ref_p.pos).normalized() * force_amp;
+
+		// This function should be called once and only after inverse kinematics	
+		points[CN_LH].ref_p.pos += truncate_command(((force_lh).segment(0,3)+hold_force_l) * 0.1/30.0, 0.2, -0.2);
+		points[CN_RH].ref_p.pos += truncate_command(((force_rh).segment(0,3)+hold_force_r) * 0.1/30.0, 0.2, -0.2);
+	}
+};
+
+class Walking
+{
+public:
+	median_filter state_filt;
+	VectorXd lp3_state, lp3_dstate;
+	double shift;
+	double fblx, fbrx, fbly, fbry;
+	double Tstep;
+	double tphase;
+	double phase;
+	double ref_vx, ref_vy, ref_w;
+	double force_lf, force_rf;
+	double al, ar;
+	double hip_gain_K, hip_gain_D;
+
+	void initialize()
+	{
+		state_filt.init(10);
+		lp3_state = VectorXd::Zero(10);
+		lp3_state = VectorXd::Zero(10);
+		shift = 0.0;
+		fblx = 0.0;
+		fbrx = 0.0;
+		fbly = 0.0;
+		fbry = 0.0;
+		Tstep = 0.4;
+		tphase = 0.0;
+		phase = 0.0;
+		ref_vx = 0.0;
+		ref_vy = 0.0;
+		ref_w = 0.0;
+		force_lf = 0.0;
+		force_rf = 0.0;
+		hip_gain_K = 1.0;
+		hip_gain_D = 0.1;
+	}
+
+	void update(double time, double dt, Contact_Manager &points)
+	{
+		tphase = fmod(time,Tstep);
+		phase = fmod(time,2.0*Tstep) > Tstep; // 1: left support, right swing
+
+		// decay the desired velocities 
+		ref_vx *= 1.0 - 0.5 * dt;
+		ref_vy *= 1.0 - 0.5 * dt;
+		ref_w  *= 1.0 - 0.5 * dt;
+
+		// foot force estimation, determines ratio
+		force_lf += (max(0.0, -points[CN_LF].T.F_sens[2]) - force_lf) * 40.0 * dt;
+		force_rf += (max(0.0, -points[CN_RF].T.F_sens[2]) - force_rf) * 40.0 * dt;
+		al = force_lf / (force_lf + force_rf);
+		ar = force_rf / (force_lf + force_rf);
+	}
+
+	void calculate_footstep_adjustments(double time, double dt, Contact_Manager &points, Joints &joints)
+	{
+		// Pelvis to CoM shift filter
+		shift += (points[CN_CM].ref_p.pos[0] - joints.ref_pos[0] - shift) * 1.0 * dt;
+
+		// step width
+		double sw = points[CN_LF].ref_p.pos[1] - points[CN_RF].ref_p.pos[1];
+
+		// Cartesian position/velocity estimation by filtering
+		lp3_state[0] = time;
+		lp3_state.segment(1,3) = points[CN_LF].p.pos + Vector3d(0.0,-sw/2.0,0.0);
+		lp3_state.segment(4,3) = joints.sens_pos.segment(0,3) + Vector3d(shift,0.0,0.0);
+		lp3_state.segment(7,3) = points[CN_RF].p.pos + Vector3d(0.0,sw/2.0,0.0);
+		VectorXd lp3_pstate = state_filt.x[(state_filt.index+1)%FILT_WIN];
+		state_filt.update(lp3_state);
+		lp3_dstate = (lp3_state - lp3_pstate)/std::max(minTimeStep,lp3_state[0]-lp3_pstate[0]);	
+
+		Vector4d elx(	lp3_state[1]-lp3_state[7],   lp3_state[4]-lp3_state[7], 
+						lp3_dstate[1]-lp3_dstate[7], lp3_dstate[4]-lp3_dstate[7]); //right sup.
+		Vector4d erx(	lp3_state[7]-lp3_state[1],   lp3_state[4]-lp3_state[1], 
+						lp3_dstate[7]-lp3_dstate[1], lp3_dstate[4]-lp3_dstate[1]); //left  sup.
+
+		Vector4d ely(	lp3_state[2]-lp3_state[8],   lp3_state[5]-lp3_state[8], 
+						lp3_dstate[2]-lp3_dstate[8], lp3_dstate[5]-lp3_dstate[8]);
+		Vector4d ery(	lp3_state[8]-lp3_state[2],   lp3_state[5]-lp3_state[2], 
+						lp3_dstate[8]-lp3_dstate[2], lp3_dstate[5]-lp3_dstate[2]);
+
+		// dead-zone functions
+		if(HARDWARE)
+		{
+			elx[0] = deadzone(elx[0]-(0.000), 0.001);
+			elx[1] = deadzone(elx[1]-(-0.016), 0.002);
+			elx[2] = deadzone(elx[2]-(0.003), 0.022);
+			elx[3] = deadzone(elx[3]-(0.003), 0.018);
+			erx[0] = deadzone(erx[0]-(-0.001), 0.001);
+			erx[1] = deadzone(erx[1]-(-0.018), 0.001);
+			erx[2] = deadzone(erx[2]-(0.003), 0.021);
+			erx[3] = deadzone(erx[3]-(-0.000), 0.019);
+			ely[0] = deadzone(ely[0]-(-0.034), 0.017);
+			ely[1] = deadzone(ely[1]-(-0.020), 0.032);
+			ely[2] = deadzone(ely[2]-(0.031), 0.216);
+			ely[3] = deadzone(ely[3]-(-0.232), 0.147);
+			ery[0] = deadzone(ery[0]-(0.042), 0.010);
+			ery[1] = deadzone(ery[1]-(0.023), 0.033);
+			ery[2] = deadzone(ery[2]-(0.032), 0.178);
+			ery[3] = deadzone(ery[3]-(0.266), 0.145);
+		}
+		
+		// smoothening the errors
+		Vector4d ex = phase==1 ? erx : elx;
+		Vector4d ey = phase==1 ? ery : ely;
+		double sig2 = exp(-pow(tphase/(Tstep/3.0),2.0));
+		ex *= 1.0 - sig2;
+		ey *= 1.0 - sig2;
+
+		// projection gains			
+		Vector4d K = projection_gains(tphase, Tstep);
+
+		// footstep position feedbacks wide range
+		fblx = phase==1 ? fblx : truncate_command(double(ex.transpose()*K), 0.2, -0.2);
+		fbrx = phase==0 ? fbrx : truncate_command(double(ex.transpose()*K), 0.2, -0.2);
+		fbly = phase==1 ? fbly : truncate_command(double(ey.transpose()*K), 0.2, -0.2);
+		fbry = phase==0 ? fbry : truncate_command(double(ey.transpose()*K), 0.2, -0.2);
+
+		// self collision avoidance
+		//fbly = max(fbly, lp3_state[8]-lp3_state[5] - 0.1*0);
+		//fbry = min(fbry, lp3_state[2]-lp3_state[5] + 0.1*0);
+	}
+
+	void apply_speed_limits()
+	{
+		if(HARDWARE)
+		{
+			ref_vx = truncate_command(ref_vx, 0.1, -0.1);
+			ref_vy = truncate_command(ref_vy, 0.1, -0.1);
+			ref_w  = truncate_command(ref_w , 0.5, -0.5);
+		}
+		else
+		{
+			ref_vx = truncate_command(ref_vx, 0.5, -0.5);
+			ref_vy = truncate_command(ref_vy, 0.2, -0.2);
+			ref_w  = truncate_command(ref_w , 1.0, -1.0);
+		}
+	}
+
+	void demand_speeds(Vector3d speeds)
+	{
+		ref_vx = speeds[0];
+		ref_vy = speeds[1];
+		ref_w  = speeds[2];
+	}
+
+	void cartesian_tasks(double time, Contact_Manager &points, Vector3d &com_adjustment)
+	{
+		// speed limits
+		apply_speed_limits();
+
+		// foot lifting control (footstepping is done in the joint space after the IK)
+		double liftL = max(0.0, sin(M_PI*time/Tstep));
+		double liftR = max(0.0, sin(M_PI*time/Tstep+M_PI));
+		points[CN_LF].ref_p.pos += Vector3d(0, 0.0, liftL * 0.02);
+		points[CN_RF].ref_p.pos += Vector3d(0, 0.0, liftR * 0.02);
+
+		// foot orientation correction, should use quat formulas in future
+		// points[CN_LF].ref_o.pos = ang2quat(-quat2ang(points[CN_LF].o.pos)*1);
+		// points[CN_RF].ref_o.pos = ang2quat(-quat2ang(points[CN_RF].o.pos)*1);
+
+		// turning velocity control control
+		points[CN_LF].ref_o.pos = quat_mul(ang2quat(Vector3d(0,0,ref_w*0.3 * ar)), points[CN_LF].ref_o.pos);
+		points[CN_RF].ref_o.pos = quat_mul(ang2quat(Vector3d(0,0,ref_w*0.3 * al)), points[CN_RF].ref_o.pos);
+
+		// sagittal/lateral velocity control
+		com_adjustment = Vector3d(0.03*ref_vx, 0.03*ref_vy, 0);
+	}
+
+	void joint_tasks(double time, double dt, double enable, Contact_Manager &points, Joints &joints, Vector3d angvel)
+	{
+		// extra leg lift by hip roll
+		double desired_roll = sin(M_PI*time/Tstep) * 0.2;
+		joints.ref_pos[7] = desired_roll;
+		joints.ref_pos[13] += -desired_roll;
+		joints.ref_pos[19] += desired_roll;
+
+		// current base orientation
+		MatrixXd cd = quat2dc(points[CN_CM].o.pos);
+		double roll = atan2(cd(2,1), cd(2,2));
+		double pitch  = -asin(cd(2,0));
+
+		// desired base orientations
+		double desired_pitch = quat2ang(getQ(joints.ref_pos))[1];
+		// double desired_roll = quat2ang(getQ(joints.ref_pos))[0];
+
+		if(!HARDWARE)
+			angvel *= 0;
+
+		// calculate fblx, fbrx, fbly, fbry
+		calculate_footstep_adjustments(time, dt, points, joints);
+
+		// definitions
+		double ll = points[CN_CM].ref_p.pos[2]; // leg length
+		int index_l = 6+6;
+		int index_r = 6+12;
+
+		Vector4d hip_des;
+		hip_des[0] = joints.ref_pos[index_l]; 
+		hip_des[1] = joints.ref_pos[index_r];
+		hip_des[2] = joints.ref_pos[index_l+1];
+		hip_des[3] = joints.ref_pos[index_r+1];
+
+		// hip pitch joints
+		double Pitch = pitch - desired_pitch;
+		double Pitch_feedback = Pitch * hip_gain_K + angvel[1] * hip_gain_D;
+		joints.ref_pos[index_l] = 	ar * (joints.ref_pos[index_l] + Pitch + fblx/ll * enable) + al * (-Pitch_feedback + joints.sens_pos[index_l]);
+		joints.ref_pos[index_r] = 	al * (joints.ref_pos[index_r] + Pitch + fblx/ll * enable) + ar * (-Pitch_feedback + joints.sens_pos[index_r]);
+		// hip roll joints
+		double Roll = roll - desired_roll;
+		double Roll_feedback = Roll * hip_gain_K + angvel[0] * hip_gain_D;
+		joints.ref_pos[index_l+1] =	ar * (joints.ref_pos[index_l+1] - Roll + fbly/ll * enable) + al * (Roll_feedback + joints.sens_pos[index_l+1]);
+		joints.ref_pos[index_r+1] = al * (joints.ref_pos[index_r+1] + Roll - fbry/ll * enable) + ar * (-Roll_feedback + joints.sens_pos[index_r+1]);
+
+		// apply hip limits to avoid dramatic failure!
+		double sagittal_bound = 0.4;
+		joints.ref_pos[index_l] = truncate_command(joints.ref_pos[index_l], hip_des[0] + sagittal_bound, hip_des[0] - sagittal_bound);
+		joints.ref_pos[index_r] = truncate_command(joints.ref_pos[index_r], hip_des[1] + sagittal_bound, hip_des[1] - sagittal_bound);
+		double lateral_bound = 0.3;
+		joints.ref_pos[index_l+1] = truncate_command(joints.ref_pos[index_l+1], hip_des[2] + lateral_bound, hip_des[2] - lateral_bound);
+		joints.ref_pos[index_r+1] = truncate_command(joints.ref_pos[index_r+1], hip_des[3] + lateral_bound, hip_des[3] - lateral_bound);
+	}
+
+	bool early_phase(double time, double dt)
+	{
+		return fmod(time,Tstep) <= dt*2.0;
+	}
+};
+
+void rePID(Wrapper &wrapper, bool walk)
+{
+	return; // BOOGH
+	MatrixXd gain = MatrixXd(32,3);
+	gain << 32000.00, 6000.00, 60.00,
+			32000.00, 6000.00, 60.00,
+			32000.00, 6000.00, 60.00,
+			50.00, 500.00, 1.00,
+			50.00, 500.00, 1.00,
+			100.00, 700.00, 2.00,
+			32000.00, 100.00, 60.00,
+			-32000.00, -100.00, -60.00,
+			32000.00, 100.00, 60.00, 
+			-32000.00, -100.00, -60.00,
+			-32000.00, -100.00, -60.00, 
+			-32000.00, -100.00, -60.00, 
+			32000.00, 100.00, 60.00, 
+			-32000.00, -100.00, -60.00,
+			32000.00, 100.00, 60.00, 
+			-32000.00, -100.00, -60.00,
+			-32000.00, -100.00, -60.00, 
+			-32000.00, -100.00, -60.00, 
+			32000.00, 50.00, 60.00, 
+			32000.00, 50.00, 60.00, 
+			10000.00, 0.00, 10.00, 
+			32000.00, 20.00, 60.00,
+			200.00, 1000.00, 1.00, 
+			100.00, 100.00, 2.00, 
+			100.00, 100.00, 2.00, 
+			32000.00, 50.00, 60.00,
+			32000.00, 50.00, 60.00, 
+			10000.00, 0.00, 10.00, 
+			32000.00, 20.00, 60.00, 
+			200.00, 1000.00, 1.00,
+			100.00, 100.00, 2.00,
+			100.00, 100.00, 2.00;
+
+	for(int i=12;i<38;i++)
+		wrapper.setPidJoint(i-6,gain(i-6,0),gain(i-6,1),0);
+
+	// relax ankle roll joints
+	int i = 17; 
+	wrapper.setPidJoint(i-6,gain(i-6,0)*0.3,gain(i-6,1)*0.3,0);
+	i = 23;
+	wrapper.setPidJoint(i-6,gain(i-6,0)*0.3,gain(i-6,1)*0.3,0);
+
+}
+
+void reCost(Contact_Manager &points)
+{
+	points[CN_CM].T.slack_cost = Vector3d(-1,-1,0.01);
+    points[CN_CM].R.slack_cost = Vector3d(1,1,1) * 0.01;
+    points[CN_TO].R.slack_cost = Vector3d(1,1,1) * 0.01;
+    points[CN_HD].R.slack_cost = Vector3d(1,1,1) * 0.01;
+
+    points[CN_LF].T.slack_cost = Vector3d(-1,-1,-1);
+    points[CN_RF].T.slack_cost = Vector3d(-1,-1,-1);
+    points[CN_LF].R.slack_cost = Vector3d(-1,-1,-1);
+    points[CN_RF].R.slack_cost = Vector3d(-1,-1,-1);
+
+    points[CN_LH].T.slack_cost = Vector3d(1,1,1);
+    points[CN_RH].T.slack_cost = Vector3d(1,1,1);
+    points[CN_LH].R.slack_cost = Vector3d(1,1,1);
+    points[CN_RH].R.slack_cost = Vector3d(1,1,1);
+}
+
+void load_tasks(Contact_Manager &points, VectorXd com, VectorXd lf, VectorXd rf, VectorXd obj, double width)
+{
+	points[CN_CM].ref_p.pos = com.segment(0,3);
+	points[CN_CM].ref_o.pos = com.segment(3,4);
+	points[CN_TO].ref_o.pos = com.segment(3,4);
+	points[CN_HD].ref_o.pos = com.segment(3,4);
+
+	points[CN_LF].ref_p.pos = lf.segment(0,3);
+	points[CN_RF].ref_p.pos = rf.segment(0,3);
+	points[CN_LF].ref_o.pos = lf.segment(3,4);
+	points[CN_RF].ref_o.pos = rf.segment(3,4);
+
+	points[CN_LH].ref_p.pos = obj.segment(0,3) + quat2dc(obj.segment(3,4)) * Vector3d(0,width/2.0,0);
+	points[CN_RH].ref_p.pos = obj.segment(0,3) + quat2dc(obj.segment(3,4)) * Vector3d(0,-width/2.0,0);
+	points[CN_LH].ref_o.pos = quat_mul(obj.segment(3,4), ang2quat(Vector3d(0,-M_PI/2,0)));
+	points[CN_RH].ref_o.pos = quat_mul(obj.segment(3,4), ang2quat(Vector3d(0,-M_PI/2,0)));
+}
+
+Vector3d linear_navigation_DS(VectorXd Object)
+{
+	double max_v = 0.3;
+	Vector3d x_dot = Object.segment(0,3);
+	Vector3d q_dot_obj = quat_log(Object.segment(3,4)).segment(0,3);
+	Vector3d q_dot_path = Vector3d(0,0,atan2(x_dot[1],x_dot[0]));
+	double sigmoid = 1.0/(1.0+exp(-Object.segment(0,2).norm()));
+	sigmoid = pow(2.0*sigmoid-1.0, 2.0);
+	Vector3d q_dot = (1.0-sigmoid) * q_dot_obj + sigmoid * q_dot_path;
+	return q_dot;
+}
+
+class bimanual_dynamical_system
+{
+public:
+
+	double gamma;
+	double dgamma;
+	double tau;
+	double dtau;
+	double orientation_factor;
+	MatrixXd A_V;
+	MatrixXd A;
+	VectorXd xd;
+	VectorXd xR;
+	VectorXd xV;
+	VectorXd qd;
+	VectorXd qR;
+	VectorXd qV;
+	double expanded_obj_width;
+	double obj_width;
+	double obj_width_dyn;
+	double force_amp;
+
+	void initialize(Vector3d obj_pos, Vector4d obj_rot)
+	{
+		// multiarm ds variables
+		gamma = 1;
+		dgamma = 0;
+		tau = 0;
+		dtau = 0;
+		orientation_factor = 3.0;
+		A_V = MatrixXd::Zero(3,3);
+		A_V(0,0) = -5;
+		A_V(1,1) = -5;
+		A_V(2,2) = -5;
+		A = MatrixXd::Zero(3,3);
+		A(0,0) = -0.3;
+		A(1,1) = -0.3;
+		A(2,2) = -0.3;
+
+		// set desired object
+		set_desired_object(obj_pos, obj_rot);
+
+		// multiarm position ds initiations
+		xR = xd;
+		xV = xR;
+		
+		// multiarm orientation ds initiations
+		qR = qd;
+		qV = qd;
+
+		// object properties
+		obj_width = 0.25;
+		expanded_obj_width = obj_width * 1.4;
+		obj_width_dyn = expanded_obj_width;
+		force_amp = 0; 
+	}
+
+	void update(bool reachable, double dt, Vector3d obj_pos, Vector3d obj_vel, Vector4d obj_rot, Vector3d obj_omg, bool grasp)
+	{
+		tau = reachable;
+		dtau = 0;
+
+		// orientation control gains
+		MatrixXd A_V_Q = (A_V.array() * orientation_factor).matrix();
+		MatrixXd A_Q = (A.array() * orientation_factor).matrix();
+
+		// multiarm position DS
+		Vector3d xO = obj_pos;
+		Vector3d dxO = obj_vel;
+		Vector3d X_I_C = xO;
+		Vector3d dxV = gamma * dxO + dgamma * (xO - X_I_C) + A_V * ((xV - X_I_C) - gamma * (xO - X_I_C));
+		xV += dxV * dt;
+		Vector3d ATX = A * (xR - xd - tau * (xV - xd)) + dtau * (xV - xd);
+		Vector3d dxR  = tau * dxV * 0 + ATX;
+		xR += dxR * dt;
+
+		// multiarm orientation DS
+		VectorXd qO = obj_rot;
+		VectorXd dqO = obj_omg;
+		VectorXd Q_I_C = qO;
+		Vector3d dqV = gamma * dqO + dgamma * quat_diff(qO, Q_I_C) + A_V_Q * (quat_diff(qV, Q_I_C) - gamma * quat_diff(qO, Q_I_C));
+		qV = quat_mul(quat_exp(0.5 * quat_deriv(dqV * dt)), qV);
+		Vector3d ATQ = A_Q * (quat_diff(qR, qd) - tau * quat_diff(qV, qd)) + dtau * quat_diff(qV, qd);
+		Vector3d dqR  = tau * dqV * 0 + ATQ;
+		qR = quat_mul(quat_exp(0.5 * quat_deriv(dqR * dt)), qR);
+
+		// grasping behavior
+		obj_width_dyn += ((grasp ? obj_width : expanded_obj_width) - obj_width_dyn) * 1 * dt;
+		force_amp = (expanded_obj_width - obj_width_dyn) / (expanded_obj_width - obj_width) * 20;
+		force_amp *= grasp? 1 : 0;
+	}
+
+	bool grasped(double eps_obj)
+	{
+		return obj_width_dyn < obj_width + eps_obj;
+	}
+
+	bool released(double eps_obj)
+	{
+		return obj_width_dyn > expanded_obj_width - eps_obj;
+	}
+
+	void set_desired_object(Vector3d obj_pos, Vector4d obj_rot)
+	{
+		xd = obj_pos;
+		qd = obj_rot;
+	}
+
+};
+
+class navigation_dynamical_system
+{
+public:
+	void initialize()
+	{
+		string path_model  = "../../lpvDS-lib/models/coManip-DS-1/";
+		string path_dim    = path_model +  "dimensions";
+		string path_Priors = path_model +  "Priors";
+		string path_Mu     = path_model +  "Mu";
+		string path_Sigma  = path_model +  "Sigma";
+		string path_A      = path_model +  "A_k";
+		string path_att    = path_model +  "attractor";
+		lpvDS planner (path_dim.c_str(), path_Priors.c_str(), path_Mu.c_str(), path_Sigma.c_str(), path_A.c_str());
+		fileUtils fileUtils_;
+		MatrixXd attractor = fileUtils_.readMatrix(path_att.c_str());
+		VectorXd att = attractor.col(0); /* Fill in attractor */
+	}
+	Vector3d linear_DS(VectorXd target)
+	{
+		// this function takes target position described in robot's frame
+		double max_v = 0.3;
+		Vector3d x_dot = target.segment(0,3);
+		Vector3d q_dot_obj = quat_log(target.segment(3,4)).segment(0,3);
+		Vector3d q_dot_path = Vector3d(0,0,atan2(x_dot[1],x_dot[0]));
+		double sigmoid = 1.0/(1.0+exp(-target.segment(0,2).norm()));
+		sigmoid = pow(2.0*sigmoid-1.0, 2.0);
+		Vector3d q_dot = (1.0-sigmoid) * q_dot_obj + sigmoid * q_dot_path;
+		// take the yaw rotation only.
+		x_dot[2] = q_dot[2];
+		return x_dot;
+	}
+	Vector3d nonlinear_DS(VectorXd target)
+	{
+		// this function takes target position described in robot's frame
+	}
+};
+
+void plot_joint_variables(Contact_Manager &points, Joints &joints)
+{
+	cout << fixed << endl;
+	cout << "  joint     min_pos   init_pos    ref_pos   com_pos    sens_pos    max_pos" << endl;
+	for(int i=6;i<AIR_N_U;i++)
+	{
+		cout << std::setw( 5 ) << i << ":"  <<
+		setprecision( 0 ) <<std::setw( 11 ) << (i<6 ? -1000 : points.model.qmin[i-6]) <<
+		setprecision( 2 ) <<std::setw( 11 ) << joints.init_pos[i] * (i<6 ? 1 : 180/M_PI) <<
+		setprecision( 2 ) <<std::setw( 11 ) << joints.ref_pos[i] * (i<6 ? 1 : 180/M_PI) <<
+		setprecision( 2 ) <<std::setw( 11 ) << joints.com_pos[i] * (i<6 ? 1 : 180/M_PI) <<
+		setprecision( 2 ) <<std::setw( 11 ) << joints.sens_pos[i] * (i<6 ? 1 : 180/M_PI) <<
+		setprecision( 0 ) <<std::setw( 11 ) << (i<6 ? 1000 : points.model.qmax[i-6]) <<
+		endl;
+		if(i==6-1 || i==12-1 || i==18-1 || i==24-1 || i==31-1)
+			cout << endl;
+	}
+}
+
+void apply_mocap_thresholds(VectorXd &Object)
+{
+	// intuitive thresholds on feasible positioins
+	Object[0] = truncate_command(Object[0], 0.5, 0.0);
+	Object[1] = truncate_command(Object[1], 0.5, -0.5);
+	Object[2] = truncate_command(Object[2], 1.5, 0.0);
+
+	// intuitive thresholds on feasible orientations
+	double theta_max = M_PI/4; // in any direction
+	if(Object.segment(3,4).adjoint()*zero_quat < cos(theta_max/2.0))
+	{
+		double alpha = ( cos(theta_max/2.0) - 1.0) / ( Object.segment(3,4).adjoint()*zero_quat - 1.0);
+		Object.segment(3,4) = alpha * (Object.segment(3,4)-zero_quat)*alpha + zero_quat;
+		Object.segment(3,4) = Object.segment(3,4).normalized();
+	}
+}
+
+class Collision
+{
+public:
+
+	fcl::CollisionRequestd c_req;
+	fcl::CollisionResultd c_res;
+	VectorXi idx_map;
+	vector<fcl::CollisionObjectd*> colObjs;
+	vector<Eigen::VectorXi> collisions_grid;
+	Body meshes_zero;
+
+	void initialize()
+	{
+		string filepath_in = "../../IKD/meshes/input/";
+		meshes_zero = read_txt_meshes(filepath_in);
+		Body meshes_new;
+		string filepath_map = "../../IKD/meshes/idx_map.txt";
+		auto collision_map = read_noncol_map(filepath_map);	
+
+		idx_map.resize(meshes_zero.size());
+		for(int i=0;i<meshes_zero.size();i++)
+			idx_map[i] = get<0>(meshes_zero[i]);
+			
+		collisions_grid = CollisionsBodyGrid(meshes_zero, collision_map, idx_map);
+		colObjs.resize(meshes_zero.size());
+		colObjs = createCollisionObj(meshes_zero);
+	}
+	bool check(Contact_Manager &points)
+	{
+		updateCollisionObj(colObjs, points.model, idx_map);
+		bool flag = false;
+		for(int i=0;i<idx_map.size();i++)
+		{		
+			for(int j=0;j<collisions_grid[i].size();j++)
+			{	
+				int i1 = i;
+				int i2 = collisions_grid[i][j];
+				c_res.clear();
+				fcl::collide(colObjs[i1], colObjs[i2], c_req, c_res);
+				if(c_res.isCollision())
+				{
+					// string name1 = get<3>(meshes_zero[i1]);
+					// string name2 = get<3>(meshes_zero[i2]);
+					// cout<< "Collision between "<< name1 <<" and " << name2 << endl;
+					flag = true;
+				}
+			}
+		}
+		// string filepath_out = "../../IKD/meshes/output/";
+		// meshes_new = update_mesh(meshes_zero, points.model);
+		// int tmp = write_txt_meshes(meshes_new, filepath_out);
+		return flag;
+	}
+};
+
+int main(int argc, char *argv[])
+{
+	// setup existing condition
+	struct sigaction sigIntHandler;
+	sigIntHandler.sa_handler = my_handler;
+	sigemptyset(&sigIntHandler.sa_mask);
+	sigIntHandler.sa_flags = 0;
+	sigaction(SIGINT, &sigIntHandler, NULL);
+
+	// YARP Wrapper
+	Wrapper wrapper;
+	if(wrapper.checkRobot(argc, argv))
+		return 1;
+	wrapper.initialize();
+	rePID(wrapper, false);
+
+	// Initialize reading robot pos from gazebo/mocap
+	if(!HARDWARE)
+		wrapper.initObject(0, wrapper.robotName + "/get_root_link_WorldPose:o");
+
+	// Initialize reading object pos from gazebo/mocap
+	if(HARDWARE)
+		wrapper.initObject(1, "/icub/DesiredCoMVelocity:o");
+	else
+		wrapper.initObject(1, "/BoxSmall/GraspedObject_WorldPose:o");
+
+	// logger
+	std::ofstream OutRecord;
+	string path_log = "/tmp/log_" + wrapper.robotName + ".txt";
+	OutRecord.open(path_log.c_str());
+
+	// joint variables
+	Joints joints;
+	joints.initialize();
+	// set entire body to position-direct mode
+	for(int i=6;i<AIR_N_U;i++) 
+		joints.mode[i] = 1;
+
+	// disable the neck joints
+	for(int i=9;i<12;i++)
+		joints.freeze[i] = 1;
+
+	// inverse kinematics parameters
+	IKPARAM ikparam;
+	ikparam.damping = 0.01;
+
+	// self collision avoidance
+	Collision collision;
+	collision.initialize();
+
+	// contact definition
+	Contact_Manager points;
+	points.initialize();
+
+	// task costs
+	reCost(points);
+
+	// set position/torque control modes, update limits
+	wrapper.initializeJoint(joints.mode.segment(6,AIR_N_U-6), joints.freeze.segment(6,AIR_N_U-6));
+	wrapper.getJointLimits(&points.model.qmin[0], &points.model.qmax[0]);
+	points.model.qmax[15-6] = -10;
+	points.model.qmax[21-6] = -10;
+	points.model.qmin[25-6] = 10;
+	points.model.qmin[32-6] = 10;
+
+	// read data once
+	yarp::os::Time::delay(1);
+	loadData(wrapper, points, joints);
+	joints.init_pos = joints.sens_pos;
+
+	// object default properties
+	Vector3d des_obj_pos(0.2, 0.0, 0.65);
+	Vector3d des_obj_rot(0.0, 0.0, 0.0);
+	Vector3d next_obj_pos = des_obj_pos;
+	Vector3d next_obj_rot = des_obj_rot;
+
+	// robot default properties
+	VectorXd des_com = vectorbig(Vector3d(0.0, 0.0, 0.53), zero_quat);
+	VectorXd des_lf = vectorbig(Vector3d(0.0, 0.095, 0.0), zero_quat);
+	VectorXd des_rf = vectorbig(Vector3d(0.0,-0.095, 0.0), zero_quat);
+	Vector3d com_adjustment = zero_v3;
+	Vector3d final_com_pos = des_com.segment(0,3);
+
+	// manipulation DS
+	bimanual_dynamical_system DS_man;
+	DS_man.initialize(des_obj_pos, ang2quat(des_obj_rot));
+
+	// navigation DS
+	navigation_dynamical_system DS_nav;
+	DS_nav.initialize();
+
+	// walking controller
+	Walking walking;
+	walking.initialize();
+
+	// grasping controller
+	Manipulation manip;
+	manip.initialize();
+
+	// prepare for reading the keyboard
+	nonblock(1);
+
+	// start the loop
+	double calib_time = 3;  // WARNING
+	state S = BALANCE;
+	trigger G = NONE;
+	bool navigate = false;
+	bool follow = false;
+	bool grasp = false;
+	double start_time = wrapper.time;
+	double walk_start = 0;
+	while(!exit_sim)
+	{
+		//////////////////////////////////////////////////// sensing ////////////////////////////////////////////////	
+		// get time
+		double time = wrapper.time - start_time;
+		
+		// read sensors
+		loadData(wrapper, points, joints);
+
+		// hand force sensor filtering
+		if(time<calib_time) 
+			manip.initial_filtering(points, wrapper.dt);
+		else
+			manip.secondary_filtering(points, wrapper.dt);
+
+		// leg forces filtering
+		walking.update(time, wrapper.dt, points);
+
+		// robot position
+		VectorXd Root = wrapper.readObject(0);
+		if(!HARDWARE)
+			Root.segment(3,4) = quat_mul(Root.segment(3,4), ang2quat(Vector3d(0,0,M_PI))); 
+		// do whatever necessary to find root's pos/rot
+
+		// object's world position
+		VectorXd Object1 = wrapper.readObject(1);
+		VectorXd Object = local_transform(points, Root, Object1);
+		if(Root.isZero(0) || Object.isZero(0)) // some mocap port is not working ...
+			Object = vectorbig(next_obj_pos, ang2quat(next_obj_rot));
+		apply_mocap_thresholds(Object);
+
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+		// after this point, points.model will be updated with ref_pos in the IK function, not the actual sens_pos
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+		// check feasibility of the object, call collision right after the IK
+		load_tasks(points, des_com, des_lf, des_rf, Object, DS_man.expanded_obj_width);
+		bool feasibility = false;
+		if(S!=WALK)
+		{
+			// check if the object is feasible to grasp, i.e. reachable and w/o collisions
+			VectorXd copy = joints.Ik_pos0;
+			IK(points, ikparam, copy, joints.freeze);
+			double IK_error = return_error(points, copy);
+			feasibility = (IK_error< 0.17) && !collision.check(points);
+		}
+
+		// read keyboard signals //////////////////////////////////////////////////////////////////////
+		double delta = 0.01;
+		if(khbit() != 0)
+		{
+			char c = fgetc(stdin);
+			fflush(stdin);
+			switch(c)
+			{
+				// general signals
+				case 'g': G = GO; break;
+				case 'h': G = HALT; break;
+				case 't': G = TAKE; break;
+				case 'r': G = RELEASE; break;
+				case 'n': navigate = !navigate; break;
+				case 'f': follow = !follow; break;
+				case 'm': grasp = !grasp; break;
+
+				// desired velocities
+				case 'w': walking.ref_vx += 0.1; break;
+				case 's': walking.ref_vx -= 0.1; break;
+				case 'a': walking.ref_vy += 0.1; break;
+				case 'd': walking.ref_vy -= 0.1; break;
+				case 'q': walking.ref_w += 0.1; break;
+				case 'e': walking.ref_w -= 0.1; break;
+
+				// desired object position
+				case 'i': des_obj_pos[0] += delta; break;
+				case 'k': des_obj_pos[0] -= delta; break;
+				case 'j': des_obj_pos[1] += delta; break;
+				case 'l': des_obj_pos[1] -= delta; break;
+				case 'p': des_obj_pos[2] += delta; break;
+				case ';': des_obj_pos[2] -= delta; break;
+				case 'o': des_obj_rot[2] -= delta*5; break;
+				case 'u': des_obj_rot[2] += delta*5; break;
+			}
+		}
+
+		// state machine //////////////////////////////////////////////////////////////////////////////
+		double eps_CoM = 0.005;
+		double eps_obj = 0.02;
+		double eps_foot = 0.05;
+		bool reached = (DS_man.xV-next_obj_pos).norm()<eps_obj; // if hands reached the destination
+		switch(S)
+		{
+			case BALANCE:
+				if(G==GO)
+				{
+					G = NONE;
+					S = WALK_START;
+					com_adjustment = Vector3d(0,0.02,0);
+				}
+				if(G==TAKE)
+				{
+					G = NONE;
+					S = PICK_APPROACH;
+					next_obj_pos = des_obj_pos + Vector3d(0,0,-0.18);
+					next_obj_rot = des_obj_rot;
+					next_obj_pos = Vector3d(0.18,0.12,0.33);
+					next_obj_rot = Vector3d(0,0,0.55);
+					next_obj_pos = Vector3d(0.14,-0.07,0.86);
+					next_obj_rot = Vector3d(0,0,-0.6);
+				}
+				if(G==RELEASE)
+				{
+					grasp = false;
+					G = NONE;
+					//S = DROP_APPROACH;
+					//next_obj_pos = des_obj_pos;
+					//next_obj_rot = des_obj_rot;
+				}
+				break;
+			case PICK_APPROACH:
+				if(reached || G==HALT)
+				{
+					G = NONE;
+					S = PICK;
+					grasp = true;
+				}
+				if(G==RELEASE)
+				{
+					G = NONE;
+					S = DROP_APPROACH;
+					next_obj_pos = des_obj_pos;
+					next_obj_rot = des_obj_rot;
+				}
+				break;
+			case PICK:
+				if(DS_man.grasped(eps_obj))
+				{
+					G = NONE;
+					S = PICK_STAND;
+					next_obj_pos = des_obj_pos;
+					next_obj_rot = des_obj_rot;
+				}
+				break;
+			case PICK_STAND:
+				if(reached)
+				{
+					G = NONE;
+					S = BALANCE;
+				}
+				break;
+			case DROP_APPROACH:
+				if(reached)
+				{
+					G = NONE;
+					S = DROP;
+					grasp = false;
+				}
+				break;
+			case DROP:
+				if(DS_man.released(eps_obj))
+				{
+					G = NONE;
+					S = DROP_STAND;
+					next_obj_pos = des_obj_pos;
+					next_obj_rot = des_obj_rot;
+				}
+				break;
+			case DROP_STAND:
+				if(reached)
+				{
+					G = NONE;
+					S = BALANCE;
+				}
+				break;
+			case WALK_START:
+				if((des_com.segment(0,3) + com_adjustment - final_com_pos).norm()<eps_CoM && walking.phase && walking.early_phase(time, wrapper.dt))
+				{
+					G = NONE;
+					S = WALK;
+					walk_start = time;
+					com_adjustment = zero_v3;
+					//rePID(W, true);
+				}
+				break;
+			case WALK:
+				if(G==HALT && walking.early_phase(time, wrapper.dt) && std::abs(points[CN_LF].p.pos[0]-points[CN_RF].p.pos[0]) < eps_foot)
+				{
+					G = NONE;
+					S = WALK_STOP;
+				}
+				break;
+			case WALK_STOP:
+				if(reached)
+				{
+					G = NONE;
+					S = BALANCE;
+					//rePID(W, false);
+				}
+				break;
+		}
+
+		// hand dynamical systems ////////////////////////////////////////////////////////////////////////////
+		DS_man.set_desired_object(des_obj_pos, ang2quat(des_obj_rot));
+		DS_man.update(feasibility, wrapper.dt, Object.segment(0,3), zero_v3, Object.segment(3,4), zero_v3, grasp);
+
+		// Cartesian tasks ////////////////////////////////////////////////////////////////////////////////
+		final_com_pos += (des_com.segment(0,3) + com_adjustment - final_com_pos) * 1 * wrapper.dt;
+		load_tasks(points, vectorbig(final_com_pos,zero_quat), des_lf, des_rf, vectorbig(DS_man.xR,DS_man.qR), DS_man.obj_width_dyn);
+		if(time>calib_time && false) // WARNING
+			manip.compliance_control(points, DS_man.force_amp);
+
+		// whole-body IK ////////////////////////////////////////////////////////////////////////////////
+		joints.ref_pos = joints.Ik_pos0;
+		double IK_time = IK(points, ikparam, joints.ref_pos, joints.freeze);
+
+		// walking stuff
+		if(S==WALK)
+		{
+			if(navigate) 
+			{
+				// here DS_nav determines reference walking velocities
+				Vector3d x_dot = DS_nav.linear_DS(Object);
+				x_dot[0] *= x_dot[0]<0 ? 0.25 : 0.5;
+				x_dot[1] *= 0.5;
+				x_dot[2] *= 1.0;
+				walking.demand_speeds(x_dot);
+			}
+			walking.cartesian_tasks(time, points, com_adjustment);
+
+			// impose lower-body motions and freeze the upper body
+			joints.freeze.segment(24,14) = VectorXd::Ones(14);
+			double IK_time2 = IK(points, ikparam, joints.ref_pos, joints.freeze);
+			joints.freeze.segment(24,14) = VectorXd::Zero(14);
+
+			// apply joint policies
+			walking.joint_tasks(time, wrapper.dt, time-walk_start>2, points, joints, wrapper.angvel);
+		}
+
+		// send final commands //////////////////////////////////////////////////////////////////////////
+		double e = exp(-pow(time/1.0,2.0));  // WARNING
+		joints.com_pos = joints.init_pos * e + joints.ref_pos * (1.0-e);
+		wrapper.controlJoint(joints.mode.segment(6,AIR_N_U-6), joints.freeze.segment(6,AIR_N_U-6), joints.com_pos.segment(6,AIR_N_U-6));
+	}
+
+	wrapper.initializeJoint(VectorXd::Zero(AIR_N_U-6), joints.freeze.segment(6,AIR_N_U-6));
+	rePID(wrapper, false);
+	nonblock(0);
+	wrapper.close();
+	return 0;
+}

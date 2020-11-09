@@ -1,0 +1,8 @@
+
+# Launch VRPN
+roslaunch vrpn_stream drone-dome.launch
+
+# After yarpserver is running run converter nodes
+roslaunch ros2yarp_data_streamer ros2yarp_BoxSmall_streamer.launch
+
+roslaunch ros2yarp_data_streamer ros2yarp_Robot_streamer.launch

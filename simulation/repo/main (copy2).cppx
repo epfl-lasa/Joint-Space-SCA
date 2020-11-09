@@ -1,0 +1,965 @@
+#include <string>
+#include <cstdio>
+#include <iostream>
+#include <fstream>
+#include <cmath>
+#include <signal.h>
+#include <unistd.h>
+
+
+// lpvDS stuff
+#include <stdio.h>
+#include <fstream>
+#include <time.h>
+#include "eigen3/Eigen/Dense"
+#include "lpvDS.h"
+#include "utils.h"
+
+#include "wrapper.h"
+#include "IK.h"
+#include "ID.h"
+using namespace std;
+
+/* Index reference and a natural posture of icub           */
+/* global positions                                        */
+/* pelvis pos:     pos[0] pos[1] pos[2]                    */
+/* pelvis rot:     pos[3] pos[4] pos[5] pos[38]            */
+/*                 // right      // left                   */
+/* head                   pos[11]                          */
+/* neck roll              pos[10]                          */
+/* neck pitch             pos[9]                           */
+/* shoulder pitch  pos[31]       pos[24]                   */
+/* shoulder roll   pos[32]       pos[25]                   */
+/* shoulder yaw    pos[33]       pos[26]                   */
+/* elbow           pos[34]       pos[27]                   */
+/* forearm yaw     pos[35]       pos[28]                   */
+/* forearm roll    pos[36]       pos[29]                   */
+/* forearm pitch   pos[37]       pos[30]                   */
+/* torso pitch            pos[6]                           */
+/* torso roll             pos[7]                           */
+/* torso yaw              pos[8]                           */
+/* hip pitch       pos[18]      pos[12]                    */
+/* hip roll        pos[19]       pos[13]                   */
+/* hip yaw         pos[20]       pos[14]                   */
+/* knee            pos[21]       pos[15]                   */
+/* ankle pitch     pos[22]       pos[16]                   */
+/* ankle roll      pos[23]       pos[17]                   */
+
+enum state {BALANCE=0,  PICK_APPROACH, PICK, PICK_STAND, DROP_APPROACH, DROP, DROP_STAND, WALK_START, WALK, WALK_STOP};
+enum trigger {NONE=0, GO, HALT, TAKE, RELEASE};
+
+bool exit_sim = false;
+void my_handler(int s)
+{
+	cout << "Exit Program Now ... " << endl;
+	exit_sim = true;
+}
+
+void loadData(wrapper &W, Contact_Manager &points, Cvector &pos,  Cvector &vel,  Cvector &acc,  Cvector &tau)
+{
+	W.readSensors();
+
+	// extra processing of data to estimate floating states
+	pos.segment(6,AIR_N_U-6)	= W.sens_pos / 180.0 * M_PI;
+	vel.segment(6,AIR_N_U-6)	= W.sens_vel / 180.0 * M_PI;
+	acc.segment(6,AIR_N_U-6)	= W.sens_acc / 180.0 * M_PI;
+	tau.segment(6,AIR_N_U-6)	= W.sens_tau;
+
+	//remove yaw angle
+	double roll = -atan2(W.R(2,1), W.R(2,2));
+	double pitch = -asin(W.R(2,0));
+	points.heading = atan2(W.R(1,0), W.R(0,0));
+	Cmatrix rot = ang2dc(Cvector3(0,pitch,0)) * ang2dc(Cvector3(roll,0,0));
+
+	Cvector q			= dc2quat(rot);
+	pos.segment(3,3)		= q.segment(0,3);
+	pos[AIR_N_U]			= q[3];
+	vel.segment(3,3)		= W.angvel / 180.0 * M_PI;
+	acc.segment(3,3)		= W.linacc;
+	for(int i=1; i<5; i++)
+	{
+		points[i].T.F_sens 	= W.FTsensor[i-1][0];
+		points[i].R.F_sens 	= W.FTsensor[i-1][1];
+	}
+
+	// update the model
+	points.M->set_state(pos, vel);
+
+	// bring the mid-foot points to zero and make feet point to +x direction
+	points.base 	= points.M->get_pos(points[CN_LF].body, points[CN_LF].offset) * 0.5
+					+ points.M->get_pos(points[CN_RF].body, points[CN_RF].offset) * 0.5;
+	points.dbase 	= points.M->get_vel(points[CN_LF].body, points[CN_LF].offset) * 0.5
+					+ points.M->get_vel(points[CN_RF].body, points[CN_RF].offset) * 0.5;
+
+	// apply transformations
+	pos.segment(0,3) 		-= points.base;
+	vel.segment(0,3) 		-= points.dbase;
+
+	// update the model
+	points.M->set_state(pos, vel);
+	points.update_kinematics();
+}
+
+Cvector local_transform(Contact_Manager &points, Cvector Object)
+{
+	// bring objects to the local frame, run after loadData function
+	Object.segment(0,3) = ang2dc(Cvector3(0,0,-points.heading)) * Object.segment(0,3) - points.base;
+	Object.segment(3,4) = quat_mul(ang2quat(Cvector3(0,0,-points.heading)), Object.segment(3,4));
+	return Object;
+}
+
+Cvector4 projection_gains(double t, double T)
+{
+	// mass = 27.6, height = 1.05, iCub Robot
+	double time = t/T;
+	if (std::abs(T-0.4)<0.1)
+	{
+		// 0 <= time <= 1 : phase time
+		// freq = 2.5 & log10(gain) = 1.1
+		double g1[4] = {
+			exp(-std::pow(time/0.595639,1.0)),
+			exp(-std::pow(time/0.434266,1.0)),
+			exp(-std::pow(time/0.458892,1.0)),
+			exp(-std::pow(time/0.636159,1.0)),
+			};
+		double g2[4] = {
+			exp(-std::pow((1.0-time)/0.1671792 ,2.0)),
+			exp(-std::pow((1.0-time)/0.2202462 ,2.0)),
+			exp(-std::pow((1.0-time)/0.5009862 ,2.0)),
+			exp(-std::pow((1.0-time)/0.1700142 ,2.0)),
+			};
+		double K[4] = {
+			0.228948 * g1[0] + 0.955843 * g2[0],
+			2.538919 * g1[1] + -1.246919 * g2[1],
+			0.033176 * g1[2] + 0.010854 * g2[2],
+			0.640404 * g1[3] + -0.160717 * g2[3],
+			};
+		Cvector4 KK(K);
+		return KK;
+	}
+	return Cvector::Zero(4);
+}
+
+double deadzone(double e,double dz)
+{
+    return e-atan(e*M_PI/2.0/dz)/M_PI*2.0*dz;
+}
+
+void rePID(wrapper &W, bool walk)
+{
+	// set gains relative to factory settigns
+	// if(walk)
+	// {
+		// hips
+		W.setPidJoint(13-6,1,1,0);
+		W.setPidJoint(19-6,1,1,0);
+		W.setPidJoint(12-6,1,1,0);
+		W.setPidJoint(18-6,1,1,0);
+		W.setPidJoint(14-6,1,1,0);
+		W.setPidJoint(20-6,1,1,0);
+
+		// knees
+		W.setPidJoint(15-6,1,1,0);
+		W.setPidJoint(21-6,1,1,0);
+
+		// ankles
+		W.setPidJoint(16-6,1,1,0);
+		W.setPidJoint(22-6,1,1,0);
+		W.setPidJoint(17-6,0.3,0.3,0);
+		W.setPidJoint(23-6,0.3,0.3,0);
+
+		// arms
+		for(int i=24;i<38;i++)
+			W.setPidJoint(i-6,1,1,0);
+	// }
+	// else
+	// {
+	// 	// hips
+	// 	W.setPidJoint(13-6,1,1,1);
+	// 	W.setPidJoint(19-6,1,1,1);
+	// 	W.setPidJoint(12-6,1,1,0);
+	// 	W.setPidJoint(18-6,1,1,0);
+	// 	W.setPidJoint(14-6,1,1,1);
+	// 	W.setPidJoint(20-6,1,1,1);
+
+	// 	// knees
+	// 	W.setPidJoint(15-6,1,1,0);
+	// 	W.setPidJoint(21-6,1,1,0);
+
+	// 	// ankles
+	// 	W.setPidJoint(16-6,1,1,0);
+	// 	W.setPidJoint(22-6,1,1,0);
+	// 	W.setPidJoint(17-6,1,1,1);
+	// 	W.setPidJoint(23-6,1,1,1);
+
+	// 	// arms
+	// 	for(int i=24;i<38;i++)
+	// 		W.setPidJoint(i-6,1,1,0);
+	// }
+}
+
+void reCost(Contact_Manager &points, bool walk, double tau)
+{
+    points[CN_LF].T.slack_cost = Cvector3(-1,-1,-1);
+    points[CN_RF].T.slack_cost = Cvector3(-1,-1,-1);
+    points[CN_LF].R.slack_cost = Cvector3(-1,-1,-1);
+    points[CN_RF].R.slack_cost = Cvector3(-1,-1,-1);
+    points[CN_LH].T.slack_cost = Cvector3(1,1,1);
+    points[CN_RH].T.slack_cost = Cvector3(1,1,1);
+    points[CN_LH].R.slack_cost = Cvector3(0.01,0.01,0.01);
+    points[CN_RH].R.slack_cost = Cvector3(0.01,0.01,0.01);
+
+    double cost = pow(10,-4.0*tau+2.0);
+    points[CN_CM].T.slack_cost = Cvector3(-1,-1,cost);
+    points[CN_CM].R.slack_cost = Cvector3(1,1,1) * cost;
+    points[CN_TO].R.slack_cost = Cvector3(1,1,1) * cost;
+    points[CN_HD].R.slack_cost = Cvector3(1,1,1) * cost * 0; // disabled neck joints
+
+	// for walking: WARNING
+	cost = 100;
+	points[CN_LF].T.slack_cost = Cvector3(1,1,1) * 100;
+    points[CN_RF].T.slack_cost = Cvector3(1,1,1) * 100;
+    points[CN_LF].R.slack_cost = Cvector3(1,1,1) * 100;
+    points[CN_RF].R.slack_cost = Cvector3(1,1,1) * 100;
+	points[CN_CM].T.slack_cost = Cvector3(100,100,cost);
+    points[CN_CM].R.slack_cost = Cvector3(1,1,1) * cost;
+    points[CN_TO].R.slack_cost = Cvector3(1,1,1) * cost;
+    points[CN_HD].R.slack_cost = Cvector3(1,1,1) * cost * 0; // disabled neck joints
+	points[CN_LH].R.slack_cost = Cvector3(1,1,1);
+    points[CN_RH].R.slack_cost = Cvector3(1,1,1);
+	points[CN_LH].T.slack_cost = Cvector3(1,1,1);
+    points[CN_RH].T.slack_cost = Cvector3(1,1,1);
+}
+
+double check_feasibility(Contact_Manager &points, Cvector Object, Cvector freezeIK, double obj_width)
+{
+	// check feasibility
+	reCost(points, false, 1.0);
+
+	points[CN_CM].ref_p.pos = Cvector3(0.0,0.0,0.53);
+	points[CN_CM].ref_o.pos = zero_quat;
+	points[CN_TO].ref_o.pos = zero_quat;
+	points[CN_HD].ref_o.pos = zero_quat;
+	points[CN_LF].ref_p.pos = Cvector3(0, 0.065, 0);
+	points[CN_RF].ref_p.pos = Cvector3(0,-0.065, 0);
+	points[CN_LF].ref_o.pos = zero_quat;
+	points[CN_RF].ref_o.pos = zero_quat;
+	points[CN_LH].ref_p.pos = Object.segment(0,3) + quat2dc(Object.segment(3,4)) * Cvector3(0,obj_width/2.0,0);
+	points[CN_RH].ref_p.pos = Object.segment(0,3) + quat2dc(Object.segment(3,4)) * Cvector3(0,-obj_width/2.0,0);
+	points[CN_LH].ref_o.pos = quat_mul(Object.segment(3,4), ang2quat(Cvector3(0,-M_PI/2,0)));
+	points[CN_RH].ref_o.pos = quat_mul(Object.segment(3,4), ang2quat(Cvector3(0,-M_PI/2,0)));
+
+	Cvector copy = Cvector::Zero(AIR_N_U+1);
+	copy[AIR_N_U] = 1;
+	copy[15] = -0.3;
+	copy[21] = -0.3;
+	IKPARAM ikparam1;
+	ikparam1.damping = 1e-3;
+	IK(points, ikparam1, copy, freezeIK);
+	return return_error(points, copy);
+}
+
+int main(int argc, char *argv[])
+{
+	// setup existing condition
+	struct sigaction sigIntHandler;
+	sigIntHandler.sa_handler = my_handler;
+	sigemptyset(&sigIntHandler.sa_mask);
+	sigIntHandler.sa_flags = 0;
+	sigaction(SIGINT, &sigIntHandler, NULL);
+
+	//lpvDS stuff
+	string path_model  = "../lpvDS-lib/models/coManip-DS-1/";
+	string path_dim    = path_model +  "dimensions";
+	string path_Priors = path_model +  "Priors";
+	string path_Mu     = path_model +  "Mu";
+	string path_Sigma  = path_model +  "Sigma";
+	string path_A      = path_model +  "A_k";
+	string path_att    = path_model +  "attractor";
+	lpvDS planner (path_dim.c_str(), path_Priors.c_str(), path_Mu.c_str(), path_Sigma.c_str(), path_A.c_str());
+	fileUtils fileUtils_;
+	MatrixXd attractor = fileUtils_.readMatrix(path_att.c_str());
+	VectorXd att = attractor.col(0); /* Fill in attractor */
+
+	// YARP wrapper
+	wrapper W;
+	if(W.checkRobot(argc, argv))
+		return 1;
+	W.initialize();
+	rePID(W, false);
+	W.initObject(0, W.robotName + "/get_root_link_WorldPose:o");
+
+	// logger
+	std::ofstream OutRecord;
+	string path_log = "/tmp/log_" + W.robotName + ".txt";
+	OutRecord.open(path_log.c_str());
+
+	// kinematic/dynamic model
+	Model model;
+	model.init();
+
+	// joint variables
+	Cvector ref_pos  = Cvector::Zero(AIR_N_U+1); ref_pos[AIR_N_U] = 1;
+	Cvector ref_vel  = Cvector::Zero(AIR_N_U);
+	Cvector ref_acc  = Cvector::Zero(AIR_N_U);
+	Cvector ref_tau  = Cvector::Zero(AIR_N_U);
+	Cvector sens_pos = Cvector::Zero(AIR_N_U+1); sens_pos[AIR_N_U] = 1;
+	Cvector sens_vel = Cvector::Zero(AIR_N_U);
+	Cvector sens_acc = Cvector::Zero(AIR_N_U);
+	Cvector sens_tau = Cvector::Zero(AIR_N_U);
+	Cvector init_pos = Cvector::Zero(AIR_N_U+1); init_pos[AIR_N_U] = 1;
+	Cvector next_pos = Cvector::Zero(AIR_N_U+1); next_pos[AIR_N_U] = 1;
+	Cvector freezeIK = Cvector::Zero(AIR_N_U);
+	Cvector mode 	 = Cvector::Zero(AIR_N_U);
+
+	// control modes
+	for(int i=6;i<AIR_N_U;i++) // entire body
+		mode[i] = 1;
+	for(int i=9;i<12;i++) // necks
+		freezeIK[i] = 1;
+
+	// contact definition
+	Contact_Manager points;
+	points.initialize(&model);
+
+	// control CoM instead of pelvis, points[CN_CM] would consider CoM position and torso orientation
+	points.ifCoM = true;
+
+	// task costs
+	reCost(points, false, 0);
+
+	// set position/torque control modes, update limits
+	W.initializeJoint(mode.segment(6,AIR_N_U-6));
+	W.getJointLimits(&model.qmin[0], &model.qmax[0]);
+	model.qmax[15-6] = -10;
+	model.qmax[21-6] = -10;
+	model.qmin[25-6] = 10;
+	model.qmin[32-6] = 10;
+
+	// read data once
+	yarp::os::Time::delay(1);
+	loadData(W, points, init_pos,  sens_vel,  sens_acc,  sens_tau);
+
+	// object properties
+	W.initObject(1, "/BoxSmall/GraspedObject_WorldPose:o");
+	double obj_width = 0.35;
+	double obj_width_dyn = obj_width;
+	Cvector3 des_obj_pos(0.2, 0.0, 0.65);
+	Cvector3 des_obj_rot(0.0, 0.0, 0.0);
+	Cvector3 next_obj_pos = des_obj_pos;
+	Cvector3 next_obj_rot = des_obj_rot;
+
+	// multiarm ds
+	double gamma = 1, dgamma = 0;
+	Cmatrix A_V = Cmatrix::Zero(3,3);
+	A_V(0,0) = -0.5;
+	A_V(1,1) = -0.5;
+	A_V(2,2) = -0.5;
+	Cmatrix A = Cmatrix::Zero(3,3);
+	A(0,0) = -0.1/10.0;
+	A(1,1) = -0.1/10.0;
+	A(2,2) = -0.1/10.0;
+
+	// multiarm position ds initiations
+	Cvector xid[2] = {des_obj_pos, des_obj_pos};
+	Cvector xR[2] = {xid[0], xid[1]};
+	Cvector xV = 0.5*xR[0] + 0.5*xR[1];
+	
+	// multiarm orientation ds initiations
+	Cvector qid[2] = {ang2quat(des_obj_rot), ang2quat(des_obj_rot)};
+	Cvector qR[2] = {qid[0], qid[1]};
+	Cvector qV = qid[0];
+
+	// robot properties
+	Cvector3 des_com_pos(0.0,0.0,0.53);
+	Cvector3 next_com_pos = des_com_pos;
+	Cvector3 final_com_pos = next_com_pos;
+
+	// initial set of tasks //////////////////////////////////////////////////////////////////////////////
+	// base tasks
+	points[CN_CM].ref_p.pos = final_com_pos;
+	points[CN_CM].ref_o.pos = zero_quat;
+	points[CN_TO].ref_o.pos = zero_quat;
+	points[CN_HD].ref_o.pos = zero_quat;
+
+	// feet tasks
+	points[CN_LF].ref_p.pos = Cvector3(0, 0.065, 0);
+	points[CN_RF].ref_p.pos = Cvector3(0,-0.065, 0);
+	points[CN_LF].ref_o.pos = zero_quat;
+	points[CN_RF].ref_o.pos = zero_quat;
+
+	// hand tasks
+	points[CN_LH].ref_o.pos = quat_mul(qR[0], ang2quat(Cvector3(0,-M_PI/2,0)));
+	points[CN_RH].ref_o.pos = quat_mul(qR[1], ang2quat(Cvector3(0,-M_PI/2,0)));
+	points[CN_LH].ref_p.pos = xR[0] + quat2dc(qR[0]) * Cvector3(0,obj_width/2,0);
+	points[CN_RH].ref_p.pos = xR[1] + quat2dc(qR[1]) * Cvector3(0,-obj_width/2,0);
+	/////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	// walking stuff
+	double Tstep = 0.4;
+	double walk_start = 0;
+	median_filter state_filt;
+	state_filt.init(10);
+
+	// prepare for reading the keyboard
+	nonblock(1);
+
+	// start the loop
+	state S = BALANCE;
+	trigger G = NONE;
+	double ref_vx = 0;
+	double ref_vy = 0;
+	double ref_w = 0;
+	bool navigate = false;
+	bool follow = false;
+	bool grasp = false;
+	double start_time = W.time;
+	while(!exit_sim)
+	{
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+		//////////////////////////////////////////////////// sensing ////////////////////////////////////////////////
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+		
+		// get time
+		double time = W.time - start_time;
+		static double prev_time = time;
+		double minTimeStep = 0.01;
+		double dt = max(time - prev_time, minTimeStep);
+		prev_time = time;
+		
+		// read sensors
+		loadData(W, points, sens_pos,  sens_vel,  sens_acc,  sens_tau);
+		Cvector grav_compns = model.get_frcmat() * (-1);
+
+		// base orientation
+		Cmatrix cd = model.get_orient(0);
+		double roll = atan2(cd(2,1), cd(2,2));
+		double pitch  = -asin(cd(2,0));
+		double yaw = atan2(cd(1,0), cd(0,0));
+
+		// arm force estimation, this compensates lower-arm weights
+		Cmatrix Forces(AIR_N_BODY,3);
+		Cmatrix Torques(AIR_N_BODY,3);
+		model.get_reac(Forces, Torques);
+		Cvector bias_lh = Cvector::Zero(6);
+		bias_lh << -11.8466,  -14.6179,  -36.7255,  0.177665, -0.748966,   0.18572;
+		Cvector bias_rh = Cvector::Zero(6);
+		bias_rh <<  32.6632,  -5.57603,  -55.8315, -0.748966, -0.511756,  0.313862;
+		Cmatrix RR = model.get_orient(26);
+		Cvector reading_lh = 
+			vectorbig(	RR*(-points[CN_LH].T.F_sens-bias_lh.segment(0,3)) + RR*Forces.block(26,0,1,3).transpose(), 
+				  		RR*(-points[CN_LH].R.F_sens-bias_lh.segment(3,3)) + RR*Torques.block(26,0,1,3).transpose());
+		RR = model.get_orient(34);
+		Cvector reading_rh = 
+			vectorbig(	RR*(-points[CN_RH].T.F_sens-bias_rh.segment(0,3)) + RR*Forces.block(34,0,1,3).transpose(),
+				  		RR*(-points[CN_RH].R.F_sens-bias_rh.segment(3,3)) + RR*Torques.block(34,0,1,3).transpose());
+		static Cvector avg_lh = Cvector::Zero(6);
+		static Cvector avg_rh = Cvector::Zero(6);		
+		if(time<10) // initial bias
+		{
+			avg_lh = avg_lh * 0.99 + reading_lh * 0.01;
+			avg_rh = avg_rh * 0.99 + reading_rh * 0.01;
+		}
+		static Cvector wrench_lh = Cvector::Zero(6);
+		static Cvector wrench_rh = Cvector::Zero(6);
+		if(time>10)
+		{
+			wrench_lh = wrench_lh * 0.95 + (reading_lh-avg_lh) * 0.05;
+			wrench_rh = wrench_rh * 0.95 + (reading_rh-avg_rh) * 0.05;
+		}
+		// cout << time << "      |     " << wrench_lh.segment(0,3).transpose() << 
+		// 				"      |     " << wrench_rh.segment(0,3).transpose() << endl;
+		
+		// foot force estimation, determines ratio
+		static double fl = 0;
+		static double fr = 0;
+		fl = fl * 0.6 + max(0.0, -points[CN_LF].T.F_sens[2]) * 0.4;
+		fr = fr * 0.6 + max(0.0, -points[CN_RF].T.F_sens[2]) * 0.4;
+		double al = fl/(fl+fr);
+		double ar = fr/(fl+fr);
+
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+		/////////////////////////////////////////////// object & hands //////////////////////////////////////////////
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+		// object position
+		W.readObject(1);
+		//Cvector Object = local_transform(points, W.Object);
+		Cvector Object = W.Object[1];
+		Object.segment(3,4) = quat_mul(dc2quat(ang2dc(Vector3d(0,0,M_PI))), Object.segment(3,4));
+		Object.segment(3,4) = quat_mul(Object.segment(3,4), dc2quat(ang2dc(Vector3d(0,0,M_PI))));
+		Object.segment(0,3) = ang2dc(Vector3d(0,0,M_PI)) * Object.segment(0,3);
+		// cout << time << "       " << 
+		// 		Object.segment(0,3).transpose() << "           " <<
+		//  		quat2ang(Object.segment(3,4)).transpose() << endl;
+
+		//if (time<20)
+		//Object = vectorbig(des_obj_pos, ang2quat(des_obj_rot)); //WARNING: no mocap yet
+		Object = vectorbig(next_obj_pos, ang2quat(next_obj_rot));
+
+		static Cvector3 P_object = Object.segment(0,3);
+		Cvector3 V_object = truncate_command(Object.segment(0,3) - P_object, 0.2, -0.2);
+		P_object += V_object * dt;
+		P_object /= P_object.norm()>1.0 ? P_object.norm() : 1.0;
+
+		double IK_error = check_feasibility(points, Object, freezeIK, obj_width);
+		model.set_state(sens_pos, sens_vel);
+        model.set_acc(sens_acc*0);
+		points.update_kinematics();
+
+		/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+		// update the transition variable
+		static double tau = (IK_error< 0.17);
+		//double dtau = truncate_command((IK_error< 0.17 && S==BALANCE) - tau, 0.3 , -0.3);
+		double dtau = truncate_command((IK_error< 0.17) - tau, 0.3 , -0.3);
+		tau += dtau * dt;
+		//tau = 0; //WARNING: no mocap yet
+
+		// my formulas for multiarm position DS
+		Cvector3 xO = P_object;
+		Cvector3 dxO = V_object;
+		Cvector3 X_I_C = xO;
+		Cvector3 dxV = gamma * dxO + dgamma * (xO - X_I_C) + A_V * ((xV - X_I_C) - gamma * (xO - X_I_C));
+		xV += dxV * dt;
+		for (int i=0;i<2;i++)
+		{
+			Cvector3 xiV = xV;// + quat2dc(qR[i]) * shift[i];
+			Cvector3 ATX = A * (xR[i] - xid[i] - tau * (xiV - xid[i])) + dtau * (xiV - xid[i]);
+			Cvector3 dxR  = tau * dxV + ATX;
+			xR[i] += dxR * dt;
+		}
+
+		// my formulas for multiarm orientation DS
+		Cvector qO = Object.segment(3,4);
+		Cvector dqO = zero_v3;
+		Cvector Q_I_C = qO;
+		Cvector3 diff_qO = quat_log(quat_sub(qO, Q_I_C)).segment(0,3);
+		Cvector3 diff_qV = quat_log(quat_sub(qV, Q_I_C)).segment(0,3);
+		Cvector3 dqV = gamma * dqO + dgamma * diff_qO + A_V * (diff_qV - gamma * diff_qO);
+		qV = quat_mul(quat_exp(0.5 * vectorbig(dqV*dt, Cvector::Zero(1))), qV);
+		for (int i=0;i<2;i++)
+		{
+			Cvector qiV = qV;
+			Cvector3 diff_qiV = quat_log(quat_sub(qiV, qid[i])).segment(0,3);
+			Cvector3 diff_qRi = quat_log(quat_sub(qR[i], qid[i])).segment(0,3);
+			Cvector3 ATX = A * (diff_qRi - tau * diff_qiV) + dtau * diff_qiV;
+			Cvector3 dqR  = tau * dqV + ATX;
+			qR[i] = quat_mul(quat_exp(0.5 * vectorbig(dqR * dt, Cvector::Zero(1))), qR[i]);
+		}
+
+		// decay the desired speeds //////////////////////////////////////////////////////////////////////
+		ref_vx *= 0.995;
+		ref_vy *= 0.995;
+		ref_w  *= 0.995;
+
+		// Use DS in case of navigation //////////////////////////////////////////////////////////////////////
+		if(S==WALK && navigate)
+		{
+			// calculate DS;
+			double max_v = 0.3;
+			Vector3d x_dot = Object.segment(0,3);
+			Cvector3 q_dot_obj = quat_log(Object.segment(3,4)).segment(0,3);
+			Cvector3 q_dot_path = Cvector3(0,0,atan2(x_dot[1],x_dot[0]));
+			double sigmoid = 1.0/(1.0+exp(-Object.segment(0,2).norm()));
+			sigmoid = pow(2.0*sigmoid-1.0, 2.0);
+			Cvector3 q_dot = (1.0-sigmoid) * q_dot_obj + sigmoid * q_dot_path;
+
+			ref_vx = truncate_command(x_dot[0]/2.0, 0.5, -0.5);
+			ref_vx *= ref_vx<0 ? 0.5 : 1;
+			ref_vy = truncate_command(x_dot[1]/2.0, 0.2, -0.2);
+			ref_w  = truncate_command(q_dot[2], 1, -1);
+		}
+
+		// read keyboard //////////////////////////////////////////////////////////////////////
+		double delta = 0.01;
+		if(khbit() != 0)
+		{
+			char c = fgetc(stdin);
+			fflush(stdin);
+			switch(c)
+			{
+				case 'g': G = GO; break;
+				case 'h': G = HALT; break;
+				case 't': G = TAKE; break;
+				case 'r': G = RELEASE; break;
+				case 'w': ref_vx += 0.1; break;
+				case 's': ref_vx -= 0.1; break;
+				case 'a': ref_vy += 0.1; break;
+				case 'd': ref_vy -= 0.1; break;
+				case 'q': ref_w += 0.1; break;
+				case 'e': ref_w -= 0.1; break;
+				case 'n': navigate = !navigate; break;
+				case 'f': follow = !follow; break;
+				case 'm': grasp = !grasp; break;
+
+				// case 'w': des_obj_pos[0] += delta; break;
+				// case 's': des_obj_pos[0] -= delta; break;
+				// case 'd': des_obj_pos[1] -= delta; break;
+				// case 'a': des_obj_pos[1] += delta; break;
+				case 'i': des_obj_pos[2] += delta; break;
+				case 'k': des_obj_pos[2] -= delta; break;
+				case 'l': des_obj_rot[2] -= delta*5; break;
+				case 'j': des_obj_rot[2] += delta*5; break;
+			}
+		}
+		//cout << time << "   |   " << grasp << "    |     " << obj_width_dyn << "     |     " << Object.transpose() << endl;
+
+		// automatic transitions //////////////////////////////////////////////////////////////////////
+		double eps_CoM = 0.005;
+		double eps_obj = 0.02;
+		double phase = fmod(time,2.0*Tstep) > Tstep; // 1: left support, right swing
+		bool lean = (final_com_pos-next_com_pos).norm()<eps_CoM && phase && fmod(time,Tstep)<=dt*2.0;
+		bool stand = (final_com_pos-next_com_pos).norm()<eps_CoM;
+		bool reached = (xV-next_obj_pos).norm()<eps_obj;
+		stand = reached;
+		bool fbig = wrench_lh.norm()>1.0 && wrench_rh.norm()>1.0;
+		fbig = obj_width_dyn < obj_width * 0.7 + 0.02;
+		bool fsmall = wrench_lh.norm()<1.0 && wrench_rh.norm()<1.0;
+		bool rest = fmod(time,Tstep)<=dt*2.0 && std::abs(points[CN_LF].p.pos[0]-points[CN_RF].p.pos[0]) < 0.05;
+
+		// state machine //////////////////////////////////////////////////////////////////////////////
+		switch(S)
+		{
+			case BALANCE:
+				if(G==GO)
+				{
+					G = NONE;
+					S = WALK_START;
+					next_com_pos = des_com_pos + Cvector3(0,0.02,0);
+					//ref_pos.segment(6,3) *= 0;
+				}
+				if(G==TAKE)
+				{
+					G = NONE;
+					S = PICK_APPROACH;
+					next_obj_pos = des_obj_pos + Cvector3(0,0,-0.18);
+					next_obj_rot = des_obj_rot;
+					next_obj_pos = Cvector3(0.18,0.12,0.33);
+					next_obj_rot = Cvector3(0,0,0.55);
+					next_obj_pos = Cvector3(0.14,-0.07,0.86);
+					next_obj_rot = Cvector3(0,0,-0.6);
+				}
+				if(G==RELEASE)
+				{
+					grasp = false;
+					G = NONE;
+					//S = DROP_APPROACH;
+					//next_obj_pos = des_obj_pos;
+					//next_obj_rot = des_obj_rot;
+				}
+				break;
+			case PICK_APPROACH:
+				if(reached || G==HALT)
+				{
+					G = NONE;
+					S = PICK;
+					grasp = true;
+				}
+				if(G==RELEASE)
+				{
+					G = NONE;
+					S = DROP_APPROACH;
+					next_obj_pos = des_obj_pos;
+					next_obj_rot = des_obj_rot;
+				}
+				break;
+			case PICK:
+				if(fbig)
+				{
+					G = NONE;
+					S = PICK_STAND;
+					next_obj_pos = des_obj_pos;
+					next_obj_rot = des_obj_rot;
+				}
+				break;
+			case PICK_STAND:
+				if(stand)
+				{
+					G = NONE;
+					S = BALANCE;
+				}
+				break;
+			case DROP_APPROACH:
+				if(reached)
+				{
+					G = NONE;
+					S = DROP;
+					grasp = false;
+				}
+				break;
+			case DROP:
+				if(fsmall)
+				{
+					G = NONE;
+					S = DROP_STAND;
+					next_obj_pos = des_obj_pos;
+					next_obj_rot = des_obj_rot;
+				}
+				break;
+			case DROP_STAND:
+				if(stand)
+				{
+					G = NONE;
+					S = BALANCE;
+				}
+				break;
+			case WALK_START:
+				if(lean)
+				{
+					G = NONE;
+					S = WALK;
+					walk_start = time;
+					next_com_pos = des_com_pos;
+					//rePID(W, true);
+				}
+				break;
+			case WALK:
+				if(G==HALT && rest)
+				{
+					G = NONE;
+					S = WALK_STOP;
+				}
+				break;
+			case WALK_STOP:
+				if(stand)
+				{
+					G = NONE;
+					S = BALANCE;
+					//rePID(W, false);
+				}
+				break;
+		}
+		//cout << time << "      " << S << "       " << G << "    " << fbig << "  |  " << tau <<  endl;
+		//cout << time << "      " << des_obj_pos.transpose() << "    |    " << des_obj_rot.transpose() << "    " << endl;
+		// cout << time << "      " << S << "       " << G << "   |  " << lean << "    " << stand << "      " << rest <<  endl;
+
+		// arm tasks //////////////////////////////////////////////////////////////////////////////
+		points[CN_LH].ref_o.pos = quat_mul(qR[0], ang2quat(Cvector3(0,-M_PI/2,0)));
+		points[CN_RH].ref_o.pos = quat_mul(qR[1], ang2quat(Cvector3(0,-M_PI/2,0)));
+		points[CN_LH].ref_p.pos = xR[0] + quat2dc(qR[0]) * Cvector3(0,obj_width_dyn/2,0);
+		points[CN_RH].ref_p.pos = xR[1] + quat2dc(qR[1]) * Cvector3(0,-obj_width_dyn/2,0);
+
+		if(grasp)
+			obj_width_dyn = obj_width_dyn * 0.99 + obj_width * 0.7 * 0.01;
+		else
+			obj_width_dyn = obj_width_dyn * 0.99 + obj_width * 0.01;
+		Cvector3 mid = points[CN_RH].ref_p.pos*0.5 + points[CN_LH].ref_p.pos*0.5;
+		double force_amp = (obj_width - obj_width_dyn) / (1.0-0.7) / obj_width * 20;
+		Cvector3 hold_force_l = (mid - points[CN_LH].ref_p.pos).normalized() * (grasp? force_amp : 0);
+		Cvector3 hold_force_r = (mid - points[CN_RH].ref_p.pos).normalized() * (grasp? force_amp : 0);
+		if(time>10 && false)
+		{ 
+			points[CN_LH].ref_p.pos += truncate_command(((wrench_lh).segment(0,3)+hold_force_l) * 0.1/30.0, 0.2, -0.2);
+			points[CN_RH].ref_p.pos += truncate_command(((wrench_rh).segment(0,3)+hold_force_r) * 0.1/30.0, 0.2, -0.2);
+		}
+		// cout << time << "     |     " << 
+		// 		(wrench_lh).segment(0,3).transpose() << "      |        " <<
+		// 		(wrench_rh).segment(0,3).transpose() << endl;
+
+		// feet tasks /////////////////////////////////////////////////////////////////////////////////
+		double liftL = S==WALK ? max(0.0, sin(M_PI*time/Tstep)) : 0;
+		double liftR = S==WALK ? max(0.0, sin(M_PI*time/Tstep+M_PI)) : 0;
+		liftL *= 1 + points[CN_LF].p.pos.segment(0,2).norm()*2 * 0;
+		liftR *= 1 + points[CN_RF].p.pos.segment(0,2).norm()*2 * 0;
+		double squeezeL = points[CN_LF].p.pos.segment(0,1).norm() * 3.0 * 0;
+		double squeezeR = points[CN_RF].p.pos.segment(0,1).norm() * 3.0 * 0;
+		points[CN_LF].ref_p.pos = Cvector3(0, 0.045+0.05*(1.0-squeezeL), liftL * 0.01);
+		points[CN_RF].ref_p.pos = Cvector3(0,-0.045-0.05*(1.0-squeezeR), liftR * 0.01);
+
+		if(S==WALK)
+		{
+			// foot orientation correction
+			points[CN_LF].ref_o.pos = ang2quat(-quat2ang(points[CN_LF].o.pos)*1);
+			points[CN_RF].ref_o.pos = ang2quat(-quat2ang(points[CN_RF].o.pos)*1);
+
+			// yaw rotation control
+			ref_w  = truncate_command(ref_w , 0.5, -0.5);
+			points[CN_LF].ref_o.pos = quat_mul(ang2quat(Cvector3(0,0,ref_w*0.3 * ar)), points[CN_LF].ref_o.pos);
+			points[CN_RF].ref_o.pos = quat_mul(ang2quat(Cvector3(0,0,ref_w*0.3 * al)), points[CN_RF].ref_o.pos);
+		}
+
+		// base tasks ////////////////////////////////////////////////////////////////////////////////
+		if(S==WALK)
+		{
+			ref_vx = truncate_command(ref_vx, 0.1, -0.1);
+			ref_vy = truncate_command(ref_vy, 0.1, -0.1);
+			next_com_pos = des_com_pos + Cvector3(0.03*ref_vx, 0.03*ref_vy, 0);
+		}
+		final_com_pos = 0.99 * final_com_pos + next_com_pos * 0.01;
+		points[CN_CM].ref_p.pos = final_com_pos;
+		points[CN_CM].ref_o.pos = ang2quat(Cvector3(0,0.1*0,0));
+		points[CN_TO].ref_o.pos = ang2quat(Cvector3(0,0.1*0,0));
+		points[CN_HD].ref_o.pos = ang2quat(Cvector3(0,0.1*0,0));
+
+		// whole-body IK ////////////////////////////////////////////////////////////////////////////////
+		reCost(points, S==WALK || S==WALK_START || S==WALK_STOP, tau);
+		IKPARAM ikparam2;
+		ikparam2.damping = 0.01;
+		ref_pos.segment(0,AIR_N_U) = init_pos.segment(0,AIR_N_U)*0;
+		ref_pos[AIR_N_U] = 1;
+		double IK_time = IK(points, ikparam2, ref_pos, freezeIK);
+		model.set_state(sens_pos, sens_vel);
+		points.update_kinematics();
+
+		Cvector4 a;
+		a[3] = ref_pos[AIR_N_U];
+		a.segment(0,3) = ref_pos.segment(3,3);
+		double desired_pitch = quat2ang(a)[1];
+
+		// joint policies ////////////////////////////////////////////////////////////////////////////////
+		if(S==WALK)
+		{
+			// extra leg lift by hip roll
+			double pelvis_roll = sin(M_PI*time/Tstep) * 0.2;
+			ref_pos[7] = pelvis_roll;
+			ref_pos[13] += -pelvis_roll;
+			ref_pos[19] += pelvis_roll;
+
+			// Pelvis to CoM shift filter
+			static double shift = 0;
+			shift = 0.99 * shift + 0.01 * (points[CN_CM].ref_p.pos[0]-ref_pos[0]);
+
+			// Cartesian velocity estimation by velocity sensors
+			double t3lp = fmod(time,Tstep);
+			Cvector lp3_state = Cvector::Zero(10);
+			lp3_state[0] = time;
+			lp3_state.segment(1,3) = points[CN_LF].p.pos;
+			lp3_state.segment(4,3) = sens_pos.segment(0,3) + Cvector3(shift,0,0);
+			lp3_state.segment(7,3) = points[CN_RF].p.pos;
+			Cvector lp3_pstate = state_filt.x[(state_filt.index+1)%FILT_WIN];
+			state_filt.update(lp3_state);
+			Cvector lp3_dstate = (lp3_state - lp3_pstate)/std::max(minTimeStep,lp3_state[0]-lp3_pstate[0]);
+
+			// projection errors
+			double sw = points[CN_LF].ref_p.pos[1] - points[CN_RF].ref_p.pos[1];
+
+			Cvector4 elx(	lp3_state[1]-lp3_state[7], lp3_state[4]-lp3_state[7], 
+					lp3_dstate[1]-lp3_dstate[7], lp3_dstate[4]-lp3_dstate[7]); //right sup.
+			Cvector4 erx(	lp3_state[7]-lp3_state[1], lp3_state[4]-lp3_state[1], 
+					lp3_dstate[7]-lp3_dstate[1], lp3_dstate[4]-lp3_dstate[1]); //left  sup.
+
+			Cvector4 ely(	lp3_state[2]-lp3_state[8]-sw, lp3_state[5]-lp3_state[8]-sw/2.0, 
+					lp3_dstate[2]-lp3_dstate[8], lp3_dstate[5]-lp3_dstate[8]);
+			Cvector4 ery(	lp3_state[8]-lp3_state[2]+sw, lp3_state[5]-lp3_state[2]+sw/2.0, 
+					lp3_dstate[8]-lp3_dstate[2], lp3_dstate[5]-lp3_dstate[2]);
+
+			// dead-zone functions
+			elx[0] = deadzone(elx[0]-(0.000), 0.001);
+			elx[1] = deadzone(elx[1]-(-0.016), 0.002);
+			elx[2] = deadzone(elx[2]-(0.003), 0.022);
+			elx[3] = deadzone(elx[3]-(0.003), 0.018);
+			erx[0] = deadzone(erx[0]-(-0.001), 0.001);
+			erx[1] = deadzone(erx[1]-(-0.018), 0.001);
+			erx[2] = deadzone(erx[2]-(0.003), 0.021);
+			erx[3] = deadzone(erx[3]-(-0.000), 0.019);
+			ely[0] = deadzone(ely[0]-(-0.034), 0.017);
+			ely[1] = deadzone(ely[1]-(-0.020), 0.032);
+			ely[2] = deadzone(ely[2]-(0.031), 0.216);
+			ely[3] = deadzone(ely[3]-(-0.232), 0.147);
+			ery[0] = deadzone(ery[0]-(0.042), 0.010);
+			ery[1] = deadzone(ery[1]-(0.023), 0.033);
+			ery[2] = deadzone(ery[2]-(0.032), 0.178);
+			ery[3] = deadzone(ery[3]-(0.266), 0.145);
+
+			// smoothening the errors
+			Cvector4 ex = phase==1 ? erx : elx;
+			Cvector4 ey = phase==1 ? ery : ely;
+			double sig2 = exp(-pow(t3lp/(Tstep/3.0),2.0));
+			ex *= 1.0 - sig2;
+			ey *= 1.0 - sig2;
+
+			// projection gains			
+			Cvector4 K = projection_gains(t3lp, Tstep);
+
+			// footstep position feedbacks wide range
+			static double fblx = 0;
+			static double fbrx = 0;
+			static double fbly = 0;
+			static double fbry = 0;
+			fblx = phase==1 ? fblx : truncate_command(double(ex.transpose()*K), 0.2, -0.2);
+			fbrx = phase==0 ? fbrx : truncate_command(double(ex.transpose()*K), 0.2, -0.2);
+			fbly = phase==1 ? fbly : truncate_command(double(ey.transpose()*K), 0.1, -0.1);
+			fbry = phase==0 ? fbry : truncate_command(double(ey.transpose()*K), 0.1, -0.1);
+
+			// collision avoidance
+			//fbly = max(fbly, lp3_state[8]-lp3_state[5] - 0.1*0);
+			//fbry = min(fbry, lp3_state[2]-lp3_state[5] + 0.1*0);
+
+			// definitions
+			double z = des_com_pos[2];
+			double hip_gain_K = 1;
+			double hip_gain_D = 0.1;
+			int index_l = 6+6;
+			int index_r = 6+12;
+			// double enable = time>30.0 ? 1.0 : 0.0; // WARNING
+			double enable = time-walk_start>2 ? 1.0 : 0.0; // WARNING
+
+			//enable = 0;
+
+			Cvector4 hip_des;
+			hip_des[0] = ref_pos[index_l]; 
+			hip_des[1] = ref_pos[index_r];
+			hip_des[2] = ref_pos[index_l+1];
+			hip_des[3] = ref_pos[index_r+1];
+
+			// hip pitch joints
+			double Pitch = pitch - desired_pitch;
+			double Pitch_feedback = Pitch * hip_gain_K + W.angvel[1] * hip_gain_D;
+			ref_pos[index_l] = 	ar * (ref_pos[index_l] + Pitch + fblx/z * enable) + 
+					   			al * (-Pitch_feedback + sens_pos[index_l]);
+			ref_pos[index_r] = 	al * (ref_pos[index_r] + Pitch + fblx/z * enable) + 
+					   			ar * (-Pitch_feedback + sens_pos[index_r]);
+			// hip roll joints
+			hip_gain_K = 1;
+			double Roll = roll - pelvis_roll;
+			double Roll_feedback = Roll * hip_gain_K + W.angvel[0] * hip_gain_D;
+			ref_pos[index_l+1] = ar * (ref_pos[index_l+1] - Roll + fbly/z * enable) + 
+					     		 al * (Roll_feedback + sens_pos[index_l+1]);
+			ref_pos[index_r+1] = al * (ref_pos[index_r+1] + Roll - fbry/z * enable) + 
+					     		 ar * (-Roll_feedback + sens_pos[index_r+1]);
+
+			double hip_bound = 0.4;
+			ref_pos[index_l] = truncate_command(ref_pos[index_l],hip_des[0]+hip_bound,hip_des[0]-hip_bound);
+			ref_pos[index_r] = truncate_command(ref_pos[index_r],hip_des[1]+hip_bound,hip_des[1]-hip_bound);
+			hip_bound = 0.2;
+			ref_pos[index_l+1] = truncate_command(ref_pos[index_l+1],hip_des[2]+hip_bound,hip_des[2]-hip_bound);
+			ref_pos[index_r+1] = truncate_command(ref_pos[index_r+1],hip_des[3]+hip_bound,hip_des[3]-hip_bound);
+		}
+		cout << time << "   " << ref_vx << "      " << ref_vy << "     " << ref_w << endl;
+
+		// send final commands //////////////////////////////////////////////////////////////////////////
+		double e = exp(-pow(time/10.0,2.0));
+		Cvector pos_command = init_pos * e + ref_pos * (1.0-e);
+		Cvector tau_command = (init_pos-sens_pos).segment(0,AIR_N_U) * 10.0 * e + ref_tau * (1.0-e);
+
+		W.controlJoint( mode.segment(6,AIR_N_U-6),
+                        pos_command.segment(6,AIR_N_U-6) / M_PI * 180,
+                        ref_tau.segment(6,AIR_N_U-6));
+
+		// plot all joint variables
+		//points.print_IK_errors();
+		//points.print_forces();
+		//cout << setprecision( 3 ) << "IK time:   " << IK_time << endl;
+		/*cout << fixed << endl;
+		cout << "  joint     min_pos   init_pos    ref_pos   com_pos    sens_pos    max_pos" << endl;
+		for(int i=6;i<AIR_N_U;i++)
+		{
+			cout << std::setw( 5 ) << i << ":"  <<
+			setprecision( 0 ) <<std::setw( 11 ) << (i<6 ? -1000 : model.qmin[i-6]) <<
+			setprecision( 2 ) <<std::setw( 11 ) << init_pos[i] * (i<6 ? 1 : 180/M_PI) <<
+			setprecision( 2 ) <<std::setw( 11 ) << ref_pos[i] * (i<6 ? 1 : 180/M_PI) <<
+			setprecision( 2 ) <<std::setw( 11 ) << pos_command[i] * (i<6 ? 1 : 180/M_PI) <<
+			setprecision( 2 ) <<std::setw( 11 ) << sens_pos[i] * (i<6 ? 1 : 180/M_PI) <<
+			setprecision( 0 ) <<std::setw( 11 ) << (i<6 ? 1000 : model.qmax[i-6]) <<
+			endl;
+			if(i==6-1 || i==12-1 || i==18-1 || i==24-1 || i==31-1)
+				cout << endl;
+		}*/
+	}
+
+	W.initializeJoint(Cvector::Zero(AIR_N_U-6));
+	rePID(W, false);
+	nonblock(0);
+	W.close();
+	return 0;
+}

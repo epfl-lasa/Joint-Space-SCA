@@ -1,0 +1,70 @@
+# A description of the CVXGEN problem (icub noSCA).
+
+dimensions
+  N = 38 # variables
+  M = 36 # tasks
+
+  nB = 6
+  nT = 3
+  nH = 3
+  nLL = 6
+  nRL = 6
+  nLH = 7
+  nRH = 7
+
+  iB = 0
+  iT = 6
+  iH = 9
+  iLL = 12
+  iRL = 18
+  iLH = 24
+  iRH = 31
+
+  cCMp = 0
+  cCMo = 3
+  cLLp = 6
+  cLLo = 9
+  cRLp = 12
+  cRLo = 15
+  cLHp = 18
+  cLHo = 21
+  cRHp = 24
+  cRHo = 27
+  cTOo = 30
+  cHDo = 33
+end
+
+parameters
+  damping (N) nonnegative
+  slack (M) nonnegative
+  J[i] (M),i=1..N
+  dx (M)
+  hard (M)
+  qlow (N-6)
+  qup (N-6)
+  qref (N)
+end
+
+variables
+  dq (N)
+  delta (M)
+end
+
+minimize
+  damping'*square(dq+qref) + slack'*square(delta)
+
+subject to
+  sum[i=iB+1..iB+N](    J[i][j] * dq[i])                                          == dx[j] + (1-hard[j])*delta[j] ,j=cCMp+1..cCMp+3
+  sum[i=iB+4..iB+nB](   J[i][j] * dq[i])                                          == dx[j] + (1-hard[j])*delta[j] ,j=cCMo+1..cCMo+3
+  sum[i=iB+1..iB+nB](   J[i][j] * dq[i]) + sum[i=iLL+1..iLL+nLL](J[i][j] * dq[i]) == dx[j] + (1-hard[j])*delta[j] ,j=cLLp+1..cLLp+3
+  sum[i=iB+4..iB+nB](   J[i][j] * dq[i]) + sum[i=iLL+1..iLL+nLL](J[i][j] * dq[i]) == dx[j] + (1-hard[j])*delta[j] ,j=cLLo+1..cLLo+3
+  sum[i=iB+1..iB+nB](   J[i][j] * dq[i]) + sum[i=iRL+1..iRL+nRL](J[i][j] * dq[i]) == dx[j] + (1-hard[j])*delta[j] ,j=cRLp+1..cRLp+3
+  sum[i=iB+4..iB+nB](   J[i][j] * dq[i]) + sum[i=iRL+1..iRL+nRL](J[i][j] * dq[i]) == dx[j] + (1-hard[j])*delta[j] ,j=cRLo+1..cRLo+3
+  sum[i=iB+1..iB+nB+nT](J[i][j] * dq[i]) + sum[i=iLH+1..iLH+nLH](J[i][j] * dq[i]) == dx[j] + (1-hard[j])*delta[j] ,j=cLHp+1..cLHp+3
+  sum[i=iB+4..iB+nB+nT](J[i][j] * dq[i]) + sum[i=iLH+1..iLH+nLH](J[i][j] * dq[i]) == dx[j] + (1-hard[j])*delta[j] ,j=cLHo+1..cLHo+3
+  sum[i=iB+1..iB+nB+nT](J[i][j] * dq[i]) + sum[i=iRH+1..iRH+nRH](J[i][j] * dq[i]) == dx[j] + (1-hard[j])*delta[j] ,j=cRHp+1..cRHp+3
+  sum[i=iB+4..iB+nB+nT](J[i][j] * dq[i]) + sum[i=iRH+1..iRH+nRH](J[i][j] * dq[i]) == dx[j] + (1-hard[j])*delta[j] ,j=cRHo+1..cRHo+3
+  sum[i=iB+4..iB+nB+nT](J[i][j] * dq[i])                                          == dx[j] + (1-hard[j])*delta[j] ,j=cTOo+1..cTOo+3
+  sum[i=iB+4..iB+nB+nT+nH](J[i][j] * dq[i])                                       == dx[j] + (1-hard[j])*delta[j] ,j=cHDo+1..cHDo+3
+  qlow[j] <= dq[j+6] <= qup[j], j=1..N-6
+end
