@@ -3,7 +3,8 @@
 # Dependencies
 1) Eigen3 - `sudo apt install libeigen3-dev`
 2) CCD - https://github.com/danfis/libccd
-2) FCL - https://github.com/flexible-collision-library/fcl
+3) FCL - https://github.com/flexible-collision-library/fcl
+4) SDFast - which is a commercial software, and therefore can not be put into this repo. Please contact Michael Koptev after acquiring the license for SDFast sources.
 
 # Building
 `mkdir build && cd build && cmake .. && make -j8`
