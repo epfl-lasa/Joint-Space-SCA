@@ -4,4 +4,4 @@
 
 Instructions for each step are provided in `README.md` files in corresponding folders.
 
-Sampling the data takes up to 8 hours, so we offer pre-sampled datasets: https://drive.google.com/file/d/1aQ7nWlCL2JtHCax6pXXfNg707a1uIRa3/view?usp=sharing
+Sampling the data takes up to 8 hours, so we offer pre-sampled datasets (for NN, SVM and CPSP): https://drive.google.com/file/d/1aQ7nWlCL2JtHCax6pXXfNg707a1uIRa3/view?usp=sharing
