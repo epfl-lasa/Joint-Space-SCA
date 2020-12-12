@@ -4,3 +4,5 @@ build/*
 *start.txt
 *end.txt
 *.asv
+sdfast/
+IKCG_cvxgen*/
