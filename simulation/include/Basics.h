@@ -28,7 +28,8 @@
 #include <sys/time.h>
 #include <Eigen/Dense>
 #include <Quaternions.h>
-#include "utils.h"
+//#include "utils.h"
+using namespace std;
 
 // #define inf 1e20
 

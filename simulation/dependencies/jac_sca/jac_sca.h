@@ -3,12 +3,12 @@
 #include "Contacts.h"
 #include "MeshUtils.h"
 
-class Collision
+class jac_sca
 {
 public:
 
-	fcl::CollisionRequestd c_req;
-	fcl::CollisionResultd c_res;
+	fcl::DistanceRequestd d_req;
+	fcl::DistanceResultd d_res;
 	VectorXi idx_map;
 	vector<string> idx_bnames;
 
@@ -16,7 +16,7 @@ public:
 	vector<Eigen::VectorXi> collisions_grid;
 	Body meshes_zero;
 
-	Collision();
-	~Collision() {};
-	vector<string> check(Contact_Manager &points);
+	jac_sca();
+	~jac_sca() {};
+	double calc_mindist(Contact_Manager &points);
 };

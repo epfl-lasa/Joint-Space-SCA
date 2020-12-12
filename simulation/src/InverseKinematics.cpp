@@ -65,7 +65,7 @@ InverseKinematics::InverseKinematics()
 	//sca_act << 1, 1, 1, 1, 1, 1, 1, 1, 1, 1;
 	//sca_act << 0, 1, 1, 0, 1, 1, 0, 0, 1, 1;
 
-	sca_verb = true;
+	sca_verb = false;
 }
 
 void InverseKinematics::update_model(Contact_Manager &points, VectorXd q0)
@@ -163,7 +163,7 @@ double InverseKinematics::return_hand_error()
 	return vectorbig((Xr-X0).segment(18,3), (Xr-X0).segment(24,3)).norm();
 }
 
-double InverseKinematics::solve(Contact_Manager &points, VectorXd& ref_pos, VectorXd freeze, vector<nn_state> &nn_models, bool &sca_toggle)
+double InverseKinematics::solve(Contact_Manager &points, VectorXd& ref_pos, VectorXd freeze, vector<nn_state> &nn_models, bool &sca_toggle, bool &symmetry)
 {
 	timeval start, end;
 	gettimeofday(&start, NULL);
@@ -195,7 +195,7 @@ double InverseKinematics::solve(Contact_Manager &points, VectorXd& ref_pos, Vect
 		{
 			sca_act << 1, 1, 1, 1, 1, 1, 1, 1, 1, 1;
 			//sca_act << 0, 1, 1, 0, 1, 1, 0, 1, 1, 1;
-
+			//sca_act << 1, 1, 1, 1, 0, 0, 0, 1, 1, 0;
 		}
 		else
 		{
@@ -210,6 +210,13 @@ double InverseKinematics::solve(Contact_Manager &points, VectorXd& ref_pos, Vect
 				int j_idx = idx_sca(i,j);
 				scaled_jpos[i][j] = (ref_pos[j_idx]-qmin_l[j_idx-6]) / (qmax_l[j_idx-6] - qmin_l[j_idx-6]);
 			}
+			//symmetric submodels - mirror torso joints
+			if(symmetry && (i==4 || i==5 || i==6 || i==9))
+			{
+				scaled_jpos[i][1] = 1 - scaled_jpos[i][1];
+				scaled_jpos[i][2] = 1 - scaled_jpos[i][2];
+			}
+			//if(symmetry && i==4 && m==num_iter-1)cout <<endl << "JPOS5:" << scaled_jpos[i].transpose() << endl;
 		}
 		#pragma omp parallel for num_threads(4)
 		for(int i=0;i<N_SM;i++)
@@ -218,6 +225,16 @@ double InverseKinematics::solve(Contact_Manager &points, VectorXd& ref_pos, Vect
 			{
 				calcGamma_nn_manual(scaled_jpos[i], nn_models[i], vec_gamma[i], vec_gamma_grad[i]);
 			}
+			//cout << vec_gamma_grad[i].transpose() << endl;
+			//symmetric submodels - invert torso gradients
+			if(symmetry && (i==4 || i==5 || i==6 || i==9))
+			{
+				vec_gamma_grad[i][1] = -1*vec_gamma_grad[i][1];
+				vec_gamma_grad[i][2] = -1*vec_gamma_grad[i][2];
+			}
+			
+			//cout << vec_gamma_grad[i].transpose() << endl<<endl;
+
 		} 
 		for(int i=0;i<N_SM;i++)
 		{
@@ -225,9 +242,10 @@ double InverseKinematics::solve(Contact_Manager &points, VectorXd& ref_pos, Vect
 			double sca_val = 0;
 			if(sca_act[i])
 			{
+				double thr_val = -1;
 				sca_val = vec_gamma[i];
 				sca_grad = vec_gamma_grad[i]; 
-				sca_val > 0 ? sca_lnval[i] = std::max(log(sca_val),-10.0) : sca_lnval[i] = -10.0;
+				sca_val > 0 ? sca_lnval[i] = std::max(log(sca_val),thr_val) : sca_lnval[i] = thr_val;
 				//sca_lnval[i] = std::max(sca_val,-50.0);
 				sca_antigrad.block(i,0,1,sca_sz[i]) = -1*sca_grad.transpose();
 			}

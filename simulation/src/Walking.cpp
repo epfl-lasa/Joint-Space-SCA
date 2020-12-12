@@ -335,7 +335,9 @@ void Walking::cartesian_tasks(double time, Contact_Manager &points, Joints &join
 		joints.freeze.segment(24,14) = VectorXd::Ones(14);
 		InverseKinematics IK;
 		bool sca_toggle = false;
-		IK.solve(points, joints.ref_pos, joints.freeze, nn_models, sca_toggle);
+		bool symmetry = false;
+
+		IK.solve(points, joints.ref_pos, joints.freeze, nn_models, sca_toggle,symmetry);
 		joints.freeze.segment(24,14) = VectorXd::Zero(14);
 		points[CN_CM].R.slack_cost = cost1;
 		points[CN_TO].R.slack_cost = cost2;

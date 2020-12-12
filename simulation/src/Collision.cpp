@@ -2,15 +2,20 @@
 
 Collision::Collision()
 {
-	string filepath_in = "../../dependencies/collision/meshes/input/";
+	string filepath_in = "../../dependencies/collision/meshes/input/simple/0";
 	meshes_zero = read_txt_meshes(filepath_in);
 	Body meshes_new;
-	string filepath_map = "../../dependencies/collision/meshes/idx_map.txt";
+	string filepath_map = "../../dependencies/collision/meshes/idx_map_c.txt";
 	auto collision_map = read_noncol_map(filepath_map);	
 
 	idx_map.resize(meshes_zero.size());
+	idx_bnames.resize(meshes_zero.size());
+
 	for(int i=0;i<meshes_zero.size();i++)
+	{
 		idx_map[i] = get<0>(meshes_zero[i]);
+		idx_bnames[i] = get<3>(meshes_zero[i]);
+	}
 		
 	collisions_grid = CollisionsBodyGrid(meshes_zero, collision_map, idx_map);
 	colObjs.resize(meshes_zero.size());
@@ -36,7 +41,7 @@ vector<string> Collision::check(Contact_Manager &points)
 				string name2 = get<3>(meshes_zero[i2]);
 				collided.push_back(name1);
 				collided.push_back(name2);
-				// cout<< "Collision between "<< name1 <<" and " << name2 << endl;
+				//cout<< "Collision between "<< name1 <<" and " << name2 << endl;
 				flag = true;
 			}
 		}

@@ -149,8 +149,9 @@ void updateCollisionObj(std::vector<fcl::CollisionObjectd*> colObjs, Model &mode
         Matrix3d R_mat = model.get_orient(idx_map[i]);
 		Vector3d T_vec = model.get_pos(idx_map[i],Vector3d(0,0,0));
         //cout << i<<": " << T_vec.transpose() << endl << R_mat << endl;
-        colObjs[i]->setTranslation(T_vec);
         colObjs[i]->setRotation(R_mat);    
+        colObjs[i]->setTranslation(T_vec);
+
     }
 }
 
@@ -160,7 +161,7 @@ vector<VectorXi> read_noncol_map(const string& fname)
     vector<VectorXi> res; 
     ifstream file(fname.c_str()); 
     string line;       
-    //Reading the Vertices first
+
     while (getline(file, line)) 
     {   
         istringstream ss(line);
@@ -191,6 +192,7 @@ vector<VectorXi> CollisionsBodyGrid(const Body& meshes, vector<VectorXi> collisi
 {
     int n_bodies = meshes.size();
     vector<VectorXi> res_grid(n_bodies);
+    //cout << "Collision body grid: " << endl;
     for(int i=0;i<n_bodies;i++)
     {   
         int c = 0;
@@ -200,8 +202,7 @@ vector<VectorXi> CollisionsBodyGrid(const Body& meshes, vector<VectorXi> collisi
             int i2 = get<0>(meshes[j]);
             for(int k=0;k<collision_map.size();k++)
             {   
-
-                if((collision_map[k][0] == i1) && (collision_map[k].tail(collision_map[k].size()-1).array() != i2).all() )
+                if((collision_map[k][0] == i1) && (collision_map[k].tail(collision_map[k].size()-1).array() == i2).any() )
                 {
                     res_grid[i].conservativeResize(c+1);
                     res_grid[i][c] = j;
@@ -209,7 +210,37 @@ vector<VectorXi> CollisionsBodyGrid(const Body& meshes, vector<VectorXi> collisi
                 }
             }
         }
+        //cout << res_grid[i].transpose() << endl;
     }
     return res_grid;
 }
+
+vector<VectorXf> read_bin_data(const std::string& fname)
+{
+    auto file = fstream(fname, ios::in | ios::binary);
+    if (file.is_open())
+        cout<< "File is opened!" << endl;
+
+    int data_size, entry_size;
+
+    file.read((char*)&data_size,sizeof(int));
+    file.read((char*)&entry_size,sizeof(int));
+
+    cout << "Dataset size is " << data_size << " x " << entry_size << endl;
+    vector<VectorXf> data;
+    data.resize(data_size);
+    for(int i = 0; i < data.size(); i++)
+    {   
+        data[i].resize(entry_size);
+        for(int j = 0; j < data[i].size(); j++)
+        {
+            file.read((char*)&data[i][j],sizeof(float));
+        }
+    }
+    file.close();
+    return data;
+}
+
+
+
 

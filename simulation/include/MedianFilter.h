@@ -2,7 +2,7 @@
 
 #include <Eigen/Dense>
 #include "utils.h"
-
+//using namespace std;
 //! A median filter function
 class MedianFilter
 {
