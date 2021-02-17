@@ -3,6 +3,8 @@
 
 Click the picture above to be redirected to the YouTube video explaining the contents of this repository. Paper reference will be added later.
 
+Corresponding publication: https://ieeexplore.ieee.org/document/9345975
+
 # Steps to reproduce the results shown in the video:
 1. Create dataset of sampled postures (or use provided data) - folder `dataset-creation`
 2. Learn SCA model via SVM/NN (or use provided models)  - folder `sca-model-learning`
