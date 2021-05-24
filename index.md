@@ -1,37 +1,22 @@
-## Welcome to GitHub Pages
+## Real-Time Self-Collision Avoidance in Joint Space for Humanoid Robots
 
-You can use the [editor on GitHub](https://github.com/epfl-lasa/Joint-Space-SCA/edit/gh-pages/index.md) to maintain and preview the content for your website in Markdown files.
-
-Whenever you commit to this repository, GitHub Pages will run [Jekyll](https://jekyllrb.com/) to rebuild the pages in your site, from the content in your Markdown files.
-
-### Markdown
-
-Markdown is a lightweight and easy-to-use syntax for styling your writing. It includes conventions for
-
+### Abstract
 ```markdown
-Syntax highlighted code block
+In this work, we propose a real-time self-collision avoidance approach for whole-body humanoid robot control. To achieve this, we learn the feasible regions of control in the humanoid's joint space as smooth self-collision boundary functions. Collision-free motions are generated online by treating the learned boundary functions as constraints in a Quadratic Program based Inverse Kinematic solver. 
+As the geometrical complexity of a humanoid robot joint space grows with the number of degrees-of-freedom (DoF), learning computationally efficient and accurate boundary functions is challenging. We address this by partitioning the robot model into multiple lower-dimensional submodels. We compare performance of several state-of-the-art machine learning techniques to learn such boundary functions. Our approach is validated on the 29-DoF iCub humanoid robot, demonstrating highly accurate real-time self-collision avoidance.
+```
+### Supplementary video for RA-L submission
+[Link](https://www.youtube.com/watch?v=u3lTwFZFicY)
+<iframe width="560" height="315" src="https://www.youtube.com/embed/u3lTwFZFicY" frameborder="0" allow="autoplay; encrypted-media" allowfullscreen></iframe>
 
-# Header 1
-## Header 2
-### Header 3
+### Code
+Code for learning the SC function/repeat teh experiments in simulation/on real robot (Python/C++):
+[Link](https://github.com/epfl-lasa/Joint-Space-SCA/)
 
-- Bulleted
-- List
-
-1. Numbered
-2. List
+### RA-L Paper 
+[Link](https://ieeexplore.ieee.org/document/9345975)
 
 **Bold** and _Italic_ and `Code` text
 
 [Link](url) and ![Image](src)
-```
 
-For more details see [GitHub Flavored Markdown](https://guides.github.com/features/mastering-markdown/).
-
-### Jekyll Themes
-
-Your Pages site will use the layout and styles from the Jekyll theme you have selected in your [repository settings](https://github.com/epfl-lasa/Joint-Space-SCA/settings/pages). The name of this theme is saved in the Jekyll `_config.yml` configuration file.
-
-### Support or Contact
-
-Having trouble with Pages? Check out our [documentation](https://docs.github.com/categories/github-pages-basics/) or [contact support](https://support.github.com/contact) and we’ll help you sort it out.
