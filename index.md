@@ -10,7 +10,7 @@ As the geometrical complexity of a humanoid robot joint space grows with the num
 Code for learning the SC function/repeat teh experiments in simulation/on real robot (Python/C++):
 [https://github.com/epfl-lasa/Joint-Space-SCA/](https://github.com/epfl-lasa/Joint-Space-SCA/)
 
-### RA-L Paper 
+### IEEE Robotics and Automation Letters Publication 
 [https://ieeexplore.ieee.org/document/9345975](https://ieeexplore.ieee.org/document/9345975)
 
 ### Citation
